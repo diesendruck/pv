@@ -203,11 +203,11 @@ def load_data(data_num, percent_train):
             data_raw = np.zeros((data_num, 1))
             for i in range(data_num):
                 # Pick a Gaussian, then generate from that Gaussian.
-                cluster_i = np.random.binomial(1, 0.5)
+                cluster_i = np.random.binomial(1, 1)
                 if cluster_i == 0:
                     data_raw[i] = np.random.normal(0, 2)
                 else:
-                    data_raw[i] = np.random.normal(10, 4)
+                    data_raw[i] = np.random.beta(2, 5)
         elif data_dimension == 2:
             def sample_c1():
                 sample = np.random.multivariate_normal(
@@ -617,8 +617,9 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         reuse=True)
 
     # SET UP MMD LOSS.
-    kmmd = compute_kmmd(x, g, k_moments=k_moments, kernel=kernel_choice, use_tf=True,
-        slim_output=True, sigma_list=[sigma])
+    kmmd = compute_kmmd(x, g, k_moments=k_moments, kernel_choice=kernel_choice,
+        use_tf=True, slim_output=True, sigma_list=[sigma])
+    mmd = compute_mmd(x, g, use_tf=True, slim_output=True)
 
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
@@ -656,7 +657,8 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
     return (x, z, z_full, x_test, avg_dist_x_test_to_x, x_precompute,
             x_test_precompute, avg_dist_x_test_to_x_precomputed,
-            distances_xt_xp, g, g_full, kmmd, loss1, loss2, g_optim, summary_op)
+            distances_xt_xp, g, g_full, kmmd, mmd, loss1, loss2, g_optim,
+            summary_op)
 
 
 def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
@@ -794,7 +796,7 @@ def main():
     elif model_type == 'kmmd_gan':
         (x, z, z_full, x_test, avg_dist_x_test_to_x, x_precompute,
          x_test_precompute, avg_dist_x_test_to_x_precomputed,
-         distances_xt_xp, g, g_full, kmmd, loss1, loss2, g_optim, summary_op) = \
+         distances_xt_xp, g, g_full, kmmd, mmd, loss1, loss2, g_optim, summary_op) = \
             build_model_kmmd_gan(
                 batch_size, gen_num, data_num, data_test_num, out_dim, z_dim)
 
@@ -855,6 +857,7 @@ def main():
                 x_test: random_batch_data_test,
                 avg_dist_x_test_to_x: avg_dist_x_test_to_x_precomputed_}
 
+            # Do an optimization step.
             if model_type == 'mmd_ae':
                 sess.run(d_optim, shared_feed_dict)
 
@@ -901,12 +904,13 @@ def main():
                            'loss2: {:.4f}').format(step, mmd_, loss1_, loss2_))
 
                 elif model_type == 'kmmd_gan':
-                    kmmd_, loss1_, loss2_, summary_result = sess.run(
-                        [kmmd, loss1, loss2, summary_op], shared_feed_dict)
+                    kmmd_, mmd_, loss1_, loss2_, summary_result = sess.run(
+                        [kmmd, mmd, loss1, loss2, summary_op], shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
-                    print(('Iter: {}, kmmd_gan: {:.4f}, loss1: {:.4f}, '
-                           'loss2: {:.4f}').format(step, kmmd_, loss1_, loss2_))
+                    print(('Iter: {}, kmmd_gan: {:.4f}, mmd: {:.4f}, '
+                           'loss1: {:.4f}, loss2: {:.4f}').format(
+                               step, kmmd_, mmd_, loss1_, loss2_))
 
                 elif model_type == 'cmd_gan':
                     cmd_, mmd_, summary_result = sess.run(
@@ -914,6 +918,13 @@ def main():
                     g_full_normed_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
                     print('Iter: {}, cmd_gan: {:.4f}, mmd: {:.4f}'.format(step, cmd_, mmd_))
+
+
+                # TODO: DIAGNOSE KMMD NaNs.
+                kmmd__ = compute_kmmd(data[:100], g_full_normed_[:100],
+                    sigma_list=[sigma], k_moments=k_moments,
+                    kernel_choice=kernel_choice, verbose=0)
+
 
                 # Unnormalize data and generated points.
                 g_full_unnormed = unnormalize(
