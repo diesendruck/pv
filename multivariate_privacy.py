@@ -142,6 +142,7 @@ def evaluate_presence_risk(train, test, sim, ball_radius=1e-2):
       sensitivity: Float of TP / (TP + FN).
       precision: Float of TP / (TP + FP).
     """
+    # TODO: Should sensitivity be a loss, rather than just be reported?
     assert len(test) < len(train), 'test should be smaller than train'
     num_samples = len(test)
     compromised_records = train[:num_samples]
@@ -203,11 +204,11 @@ def load_data(data_num, percent_train):
             data_raw = np.zeros((data_num, 1))
             for i in range(data_num):
                 # Pick a Gaussian, then generate from that Gaussian.
-                cluster_i = np.random.binomial(1, 1)
+                cluster_i = np.random.binomial(1, 0.6)
                 if cluster_i == 0:
                     data_raw[i] = np.random.normal(0, 2)
                 else:
-                    data_raw[i] = np.random.beta(2, 5)
+                    data_raw[i] = np.random.normal(6, 2)
         elif data_dimension == 2:
             def sample_c1():
                 sample = np.random.multivariate_normal(
@@ -295,7 +296,7 @@ def add_nongraph_summary_items(summary_writer, step, dict_to_add):
     summary_writer.flush()
 
 
-def avg_nearest_neighbor_distance(candidates, references):
+def avg_nearest_neighbor_distance(candidates, references, flag='noflag'):
     """Measures distance from candidate set to a reference set.
 
     For each element in candidate set, find distance to nearest neighbor in
@@ -313,9 +314,12 @@ def avg_nearest_neighbor_distance(candidates, references):
     for i in xrange(candidates.shape[0]):
         c_i = tf.gather(candidates, [i]) 
         distances_from_i = tf.norm(c_i - references, axis=1)
-        distances_negative = -1.0 * distances_from_i
-        smallest_dist_negative, _ =  tf.nn.top_k(distances_negative)
-        distances += [-1.0 * smallest_dist_negative[0]]
+        d_from_i_reshaped = tf.reshape(distances_from_i, [1, -1])  # NEW
+        distances_negative = -1.0 * d_from_i_reshaped
+        smallest_dist_negative, _ =  tf.nn.top_k(distances_negative, name=flag)
+
+        distances.append(-1.0 * smallest_dist_negative[0])
+
     avg_dist = tf.reduce_mean(distances)
     return avg_dist, distances
 
@@ -443,7 +447,8 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     x_test_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_test_precompute')
     avg_dist_x_test_to_x_precomputed, distances_xt_xp = \
-        avg_nearest_neighbor_distance(x_test_precompute, x_precompute)
+        avg_nearest_neighbor_distance(x_test_precompute, x_precompute,
+            flag='xt_to_xp')
 
     # Regular training placeholders.
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
@@ -471,20 +476,26 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
-    avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
+    avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x, flag='g_to_x')
     loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_test_to_x)
 
     # Data as close to simulations as heldout to simulations.
     # (Simulations don't reveal "source", in being closer to data than to heldout.
-    avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
-    avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
-    loss2 = tf.abs(avg_dist_x_to_g - avg_dist_x_test_to_g)
+    avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(
+        x, g, flag='x_to_g')
+    avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(
+        x_test, g, flag='xt_to_g')
+    #loss2 = tf.abs(avg_dist_x_to_g - avg_dist_x_test_to_g)
+    # TODO: Should this loss be one-sided? i.e. just want x_to_g > x_test_to_g.
+    margin = 0.05
+    loss2 = tf.nn.relu(avg_dist_x_test_to_g - avg_dist_x_to_g + margin)
 
     #d_loss = ae_loss - 2.0 * mmd - loss1 - loss2
     #d_loss = 0.1 * ae_loss - mmd - 0.1 * (loss1 + loss2)
     #g_loss = mmd + 0.1 * (loss1 + loss2)
-    d_loss = 0.1 * ae_loss - mmd #- 0.1 * (loss2)
-    g_loss = mmd #+ 0.1 * (loss2)
+    #d_loss = 0.1 * ae_loss - mmd - 0.1 * (loss2)
+    d_loss = 0.1*ae_loss - mmd
+    g_loss = mmd + 0.5*loss2
 
     if optimizer == 'adagrad':
         d_opt = tf.train.AdagradOptimizer(learning_rate)
@@ -645,7 +656,17 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         g_opt = tf.train.GradientDescentOptimizer(learning_rate)
 
     # Define optim nodes.
-    g_optim = g_opt.minimize(g_loss, var_list=g_vars)
+    # TODO: TEST CLIPPED GENERATOR.
+    clip = 1
+    if clip:
+        g_grads_, g_vars_ = zip(*g_opt.compute_gradients(g_loss, var_list=g_vars))
+        g_grads_clipped_ = tuple(
+            [tf.clip_by_value(grad, -0.01, 0.01) for grad in g_grads_])
+        g_optim = g_opt.apply_gradients(zip(g_grads_clipped_, g_vars_))
+    else:
+        g_optim = g_opt.minimize(g_loss, var_list=g_vars)
+
+
 
     # Define summary op for reporting.
     summary_op = tf.summary.merge([
@@ -694,14 +715,19 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     # (Simulations don't reveal "source", in being closer to data than to heldout.
     avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
     avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
-    loss2 = tf.abs(avg_dist_x_to_g - avg_dist_x_test_to_g)
+    #loss2 = tf.abs(avg_dist_x_to_g - avg_dist_x_test_to_g)
+    # TODO: Should this loss be one-sided? i.e. just want x_to_g > x_test_to_g.
+    margin = 0.05
+    loss2 = tf.nn.relu(avg_dist_x_test_to_g - avg_dist_x_to_g + margin)
 
     # SET UP CMD LOSS.
-    cmd = compute_cmd(x, g, k_moments=k_moments, use_tf=True,
-        cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)  # TODO: Experimental. Putting scale on moment exponent.
+    # TODO: Experimental. Putting scale on moment exponent.
+    cmd = compute_cmd(x, g, k_moments=k_moments, use_tf=True, cmd_a=cmd_a,
+        cmd_b=cmd_b, cmd_gamma=cmd_gamma)  
     mmd = compute_mmd(x, g, use_tf=True, slim_output=True)
 
-    g_loss = cmd
+    #g_loss = cmd
+    g_loss = cmd + 0.1 * loss2
     #g_loss = cmd + 0.1 * mmd
 
     if optimizer == 'adagrad':
@@ -714,7 +740,15 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         g_opt = tf.train.GradientDescentOptimizer(learning_rate)
 
     # Define optim nodes.
-    g_optim = g_opt.minimize(g_loss, var_list=g_vars)
+    # TODO: TEST CLIPPED GENERATOR.
+    clip = 1
+    if clip:
+        g_grads_, g_vars_ = zip(*g_opt.compute_gradients(g_loss, var_list=g_vars))
+        g_grads_clipped_ = tuple(
+            [tf.clip_by_value(grad, -0.01, 0.01) for grad in g_grads_])
+        g_optim = g_opt.apply_gradients(zip(g_grads_clipped_, g_vars_))
+    else:
+        g_optim = g_opt.minimize(g_loss, var_list=g_vars)
 
     # Define summary op for reporting.
     summary_op = tf.summary.merge([
@@ -726,7 +760,8 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
     return (x, z, z_full, x_test, x_precompute, x_test_precompute,
             avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-            distances_xt_xp, g, g_full, cmd, mmd, g_optim, summary_op)
+            distances_xt_xp, g, g_full, cmd, mmd, loss1, loss2, g_optim,
+            summary_op)
 
 
 def main():
@@ -753,6 +788,7 @@ def main():
      data_raw_std) = load_data(data_num, percent_train)
     normed_moments_data = compute_moments(data, k_moments=k_moments+3)
     normed_moments_data_test = compute_moments(data_test, k_moments=k_moments+3)
+    nmd_zero_indices = np.argwhere(np.array(normed_moments_data) < 0.1) 
     
     log_dir, checkpoint_dir, plot_dir, g_out_dir = prepare_dirs(load_existing)
     save_tag = str(args)
@@ -796,8 +832,8 @@ def main():
     elif model_type == 'kmmd_gan':
         (x, z, z_full, x_test, avg_dist_x_test_to_x, x_precompute,
          x_test_precompute, avg_dist_x_test_to_x_precomputed,
-         distances_xt_xp, g, g_full, kmmd, mmd, loss1, loss2, g_optim, summary_op) = \
-            build_model_kmmd_gan(
+         distances_xt_xp, g, g_full, kmmd, mmd, loss1, loss2, g_optim,
+         summary_op) = build_model_kmmd_gan(
                 batch_size, gen_num, data_num, data_test_num, out_dim, z_dim)
 
     elif model_type == 'cmd_gan':
@@ -806,8 +842,8 @@ def main():
         cmd_b = np.max(data)
         (x, z, z_full, x_test, x_precompute, x_test_precompute,
          avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-         distances_xt_xp, g, g_full, cmd, mmd, g_optim, summary_op) = \
-            build_model_cmd_gan(
+         distances_xt_xp, g, g_full, cmd, mmd, loss1, loss2, g_optim,
+         summary_op) = build_model_cmd_gan(
                 batch_size, gen_num, data_num, data_test_num, out_dim, z_dim,
                 cmd_a, cmd_b)
         print('cmd_gamma: {:.2f}'.format(1.0 / (np.abs(cmd_b - cmd_a))))
@@ -841,6 +877,13 @@ def main():
                 {x_precompute: data,
                  x_test_precompute: data_test})
 
+        # Container to hold relative errors of moments.
+        do_relative = 1
+        if do_relative:
+            relative_error_of_moments = np.zeros(
+                ((max_step - load_step) / log_step, k_moments+3))
+            reom = relative_error_of_moments
+
         #######################################################################
         # train()
         start_time = time()
@@ -873,7 +916,7 @@ def main():
             ###################################################################
             # log()
             # Occasionally log/plot results.
-            if step % log_step == 0:
+            if step % log_step == 0 and step > 0:
                 # Read off from graph.
                 if model_type == 'mmd_ae':
                     (d_loss_, ae_loss_, mmd_, g_batch_, summary_result,
@@ -913,11 +956,13 @@ def main():
                                step, kmmd_, mmd_, loss1_, loss2_))
 
                 elif model_type == 'cmd_gan':
-                    cmd_, mmd_, summary_result = sess.run(
-                        [cmd, mmd, summary_op], shared_feed_dict)
+                    cmd_, mmd_, loss1_, loss2_, summary_result = sess.run(
+                        [cmd, mmd, loss1, loss2, summary_op], shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
-                    print('Iter: {}, cmd_gan: {:.4f}, mmd: {:.4f}'.format(step, cmd_, mmd_))
+                    print(('Iter: {}, cmd_gan: {:.4f}, mmd: {:.4f} '
+                           'loss1: {:.4f}, loss2: {:.4f}').format(
+                               step, cmd_, mmd_, loss1_, loss2_))
 
 
                 # TODO: DIAGNOSE KMMD NaNs.
@@ -938,39 +983,60 @@ def main():
                 if data_dimension <= 2:
                     normed_moments_gens = compute_moments(g_full_normed_,
                         k_moments=k_moments + 3)
-                    do_relative = 1
-                    if not do_relative:
+                    if do_relative:
+                        print('  data_normed moments: {}'.format(
+                            normed_moments_data))
+                        relative_error_of_moments_test = np.round(
+                            (np.array(normed_moments_data_test) -
+                             np.array(normed_moments_data)) /
+                             np.array(normed_moments_data), 2)
+                        relative_error_of_moments_gens = np.round(
+                            (np.array(normed_moments_gens) -
+                             np.array(normed_moments_data)) /
+                             np.array(normed_moments_data), 2)
+
+                        relative_error_of_moments_test[nmd_zero_indices] = 0.0
+                        relative_error_of_moments_gens[nmd_zero_indices] = 0.0
+                        reom[step / log_step] = relative_error_of_moments_gens
+
+                        print('    RELATIVE_TEST: {}'.format(list(
+                            relative_error_of_moments_test)))
+                        print('    RELATIVE_GENS: {}'.format(list(
+                            relative_error_of_moments_gens)))
+
+                        # For plotting, zero-out moments that are likely zero, so
+                        # their relative values don't dominate the plot.
+                        """
+                        zero_indices = np.argwhere(np.array(
+                            normed_moments_data) < 0.1) 
+                        relative_error_of_moments_test[zero_indices] = 0.0
+                        relative_error_of_moments_gens[zero_indices] = 0.0
+                        fig, ax = plt.subplots()
+                        ax.plot(relative_error_of_moments_test, label='test')
+                        ax.plot(relative_error_of_moments_gens, label='gens')
+                        ax.legend()
+                        plt.savefig(os.path.join(
+                            plot_dir, 'relatives_{}.png'.format(step)))
+                        plt.close(fig)
+                        """
+                        fig, ax = plt.subplots()
+                        for i in range(reom.shape[1]):
+                            ax.plot(reom[:step/log_step, i], label='m{}'.format(i+1))
+                        ax.legend()
+                        plt.title('Relative errors of moments, k={}'.format(
+                            k_moments))
+                        plt.savefig(os.path.join(
+                            plot_dir, 'reom.png'))
+                        plt.close(fig)
+
+
+                    else:
                         print('  data_normed moments: {}'.format(
                             normed_moments_data))
                         print('  test_normed moments: {}'.format(
                             normed_moments_data_test))
                         print('  gens_normed moments: {}'.format(
                             normed_moments_gens))
-                    else:
-                        print('  data_normed moments: {}'.format(
-                            normed_moments_data))
-                        relative_test_moments = np.round(
-                            (np.array(normed_moments_data_test) -
-                             np.array(normed_moments_data)) /
-                             np.array(normed_moments_data), 2)
-                        relative_gens_moments = np.round(
-                            (np.array(normed_moments_gens) -
-                             np.array(normed_moments_data)) /
-                             np.array(normed_moments_data), 2)
-                        print('  RELATIVE_TEST: {}'.format(list(relative_test_moments)))
-                        print('  RELATIVE_GENS: {}'.format(list(relative_gens_moments)))
-
-                    # For plotting, zero-out moments that are likely zero, so
-                    # their relative values don't dominate the plot.
-                    zero_indices = np.argwhere(np.array(normed_moments_data) < 0.1) 
-                    relative_test_moments[zero_indices] = 0.0
-                    relative_gens_moments[zero_indices] = 0.0
-                    fig, ax = plt.subplots()
-                    ax.plot(relative_test_moments, label='test')
-                    ax.plot(relative_gens_moments, label='gens')
-                    ax.legend()
-                    plt.savefig(os.path.join(plot_dir, 'relatives_{}.png'.format(step)))
-                    plt.close(fig)
 
                 # Compute disclosure risk.
                 (sensitivity, precision, false_positive_rate, tp, fn, fp,
