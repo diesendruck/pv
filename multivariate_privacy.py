@@ -26,8 +26,13 @@ from scipy.stats import multivariate_normal, shapiro
 # Config.
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_type', type=str, default='mmd_gan',
-                    choices=['mmd_ae', 'mmd_gan', 'mmd_gan_simple',
+                    choices=['ae_base', 'mmd_gan', 'mmd_gan_simple',
                              'kmmd_gan', 'cmd_gan'])
+parser.add_argument('--cmd_variation', type=str, default=None,
+                     choices=['none', 'minus_k_plus_1', 'minus_mmd'])
+parser.add_argument('--ae_variation', type=str, default=None,
+                     choices=['pure', 'subset', 'cmd_k', 'mmd',
+                              'cmd_k_minus_k_plus_1'])
 parser.add_argument('--data_num', type=int, default=10000)
 parser.add_argument('--data_dimension', type=int, default=1)
 parser.add_argument('--percent_train', type=float, default=0.9)
@@ -46,8 +51,6 @@ parser.add_argument('--optimizer', type=str, default='rmsprop',
                     choices=['adagrad', 'adam', 'gradientdescent', 'rmsprop'])
 parser.add_argument('--data_file', type=str, default='gp_data.txt')
 parser.add_argument('--k_moments', type=int, default=2)
-parser.add_argument('--cmd_variation', type=str, default=None,
-                     choices=['minus_k_plus_1', 'minus_mmd'])
 parser.add_argument('--kernel_choice', type=str, default='rbf_taylor',
                     choices=['poly', 'rbf_taylor'])
 parser.add_argument('--sigma', type=int, default=1)
@@ -57,6 +60,8 @@ parser.add_argument('--load_existing', default=False, action='store_true',
                     dest='load_existing')
 args = parser.parse_args()
 model_type = args.model_type
+cmd_variation = args.cmd_variation
+ae_variation = args.ae_variation
 data_num = args.data_num
 data_dimension = args.data_dimension
 percent_train = args.percent_train
@@ -72,7 +77,6 @@ lr_update_step = args.lr_update_step
 optimizer = args.optimizer
 data_file = args.data_file
 k_moments = args.k_moments
-cmd_variation = args.cmd_variation
 kernel_choice = args.kernel_choice
 sigma = args.sigma
 cmd_gamma = args.cmd_gamma
@@ -344,7 +348,8 @@ def avg_nearest_neighbor_distance(candidates, references, flag='noflag'):
     return avg_dist, distances
 
 
-def build_model_mmd_ae(batch_size, data_num, data_test_num, gen_num, out_dim, z_dim):
+def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
+        z_dim, cmd_a, cmd_b):
     # Placeholders to precompute avg distance from data_test to data.
     x_precompute = tf.placeholder(tf.float32, [data_num, out_dim],
         name='x_precompute')
@@ -376,31 +381,32 @@ def build_model_mmd_ae(batch_size, data_num, data_test_num, gen_num, out_dim, z_
     # 1. Compute MMD between original input and random subset of input.
     # 2. Add this altered MMD to the original for all those MMDs.
     # 3. Include loss on closeness/min distance from ae(x) to x.
-    mmd_ae_option = 'ae2'
-    if mmd_ae_option == 'ae0':
-        mmd = ae_loss
-    elif mmd_ae_option == 'ae1':
-        # Determined to be a trivial scaling of the standard MMD.
-        mmd_subset = 0
-        for i in xrange(batch_size):
-            indices_to_keep = np.delete(np.arange(batch_size), i)
-            x_i = tf.gather(x, indices_to_keep) 
-            _, ae_x_i, _, _ = autoencoder(x_i,
-                width=width, depth=depth, activation=activation, z_dim=z_dim,
-                reuse=True)
-            mmd_i = compute_mmd(x, ae_x_i, use_tf=True, slim_output=True)
-            mmd_subset +=  mmd_i
-        mmd_normal = compute_mmd(x, ae_x, use_tf=True, slim_output=True)
-        mmd = mmd_subset
-    elif mmd_ae_option == 'ae2':
-        # MMD btwn encodings of batch, and encodings of batch subset.
-        subset_indices = np.random.choice(batch_size, int(batch_size * 0.25),  # TODO: ARG VARIABLE?
-            replace=False)
+    if ae_variation == 'pure':
+        ae_base_loss = ae_loss
+    elif ae_variation == 'subset':
+        # MMD between autoencodings of batch, and batch subset.
+        #   TODO: Should the percentage be an arg var?
+        subset_indices = np.random.choice(
+            batch_size, int(batch_size * 0.25), replace=False)  
         x_subset = tf.gather(x, subset_indices) 
         _, ae_x_subset, _, _ = autoencoder(x_subset,
             width=width, depth=depth, activation=activation, z_dim=z_dim,
             reuse=True)
-        mmd = compute_mmd(ae_x, x_subset, use_tf=True, slim_output=True)
+        ae_base_loss = compute_mmd(ae_x, x_subset, use_tf=True, slim_output=True)
+    elif ae_variation == 'mmd':
+        # MMD between batch and autoencodings of batch.
+        ae_base_loss = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
+    elif ae_variation == 'cmd_k':
+        # CMD between batch and autoencodings of batch.
+        ae_base_loss = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True,
+            cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)  
+    elif ae_variation == 'cmd_k_minus_k_plus_1':
+        # Same as above, but with diverging k+1'th moment.
+        cmd_k = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True,
+            cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)  
+        cmd_k_minus_k_plus_1 = compute_cmd(ae_x, x, k_moments=k_moments+1,
+            use_tf=True, cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)
+        ae_base_loss = 2 * cmd_k - cmd_k_minus_k_plus_1
 
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
@@ -418,16 +424,18 @@ def build_model_mmd_ae(batch_size, data_num, data_test_num, gen_num, out_dim, z_
 
     #d_loss = mmd + loss1 + loss2
     #d_loss = ae_loss + mmd + 1e-1 * loss1 + 1e-1 * loss2
-    d_loss = ae_loss + 2. * mmd #+ 2. * loss2 #+ loss1 + 2.0 * loss2
+    d_loss = ae_loss + 2. * ae_base_loss#+ 2. * loss2 #+ loss1 + 2.0 * loss2
 
+    lr = tf.Variable(learning_rate, name='lr', trainable=False)
+    lr_update = tf.assign(lr, tf.maximum(lr * 0.8, 1e-8), name='lr_update')
     if optimizer == 'adagrad':
-        d_opt = tf.train.AdagradOptimizer(learning_rate)
+        d_opt = tf.train.AdagradOptimizer(lr)
     elif optimizer == 'adam':
-        d_opt = tf.train.AdamOptimizer(learning_rate)
+        d_opt = tf.train.AdamOptimizer(lr)
     elif optimizer == 'rmsprop':
-        d_opt = tf.train.RMSPropOptimizer(learning_rate)
+        d_opt = tf.train.RMSPropOptimizer(lr)
     else:
-        d_opt = tf.train.GradientDescentOptimizer(learning_rate)
+        d_opt = tf.train.GradientDescentOptimizer(lr)
 
     # Define optim nodes.
     # Clip encoder gradients.
@@ -448,15 +456,15 @@ def build_model_mmd_ae(batch_size, data_num, data_test_num, gen_num, out_dim, z_
 	tf.summary.scalar("loss/ae_loss", ae_loss),
 	tf.summary.scalar("loss/loss1", loss1),
 	tf.summary.scalar("loss/loss2", loss2),
-	tf.summary.scalar("loss/mmd", mmd),
+	tf.summary.scalar("loss/ae_base_loss", ae_base_loss),
 	tf.summary.scalar("loss/d_loss", d_loss),
-	tf.summary.scalar("misc/lr", learning_rate),
+	tf.summary.scalar("misc/lr", lr),
     ])
 
     return (x, x_full, x_test, x_precompute, x_test_precompute,
             avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-            distances_xt_xp, g, g_full, ae_loss, d_loss, mmd, loss1, loss2,
-            d_optim, summary_op)
+            distances_xt_xp, g, g_full, ae_loss, d_loss, ae_base_loss, loss1,
+            loss2, lr_update, d_optim, summary_op)
 
 
 def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
@@ -602,14 +610,16 @@ def build_model_mmd_gan_simple(batch_size, gen_num, data_num, data_test_num,
 
     g_loss = mmd
 
+    lr = tf.Variable(learning_rate, name='lr', trainable=False)
+    lr_update = tf.assign(lr, tf.maximum(lr * 0.8, 1e-8), name='lr_update')
     if optimizer == 'adagrad':
-        g_opt = tf.train.AdagradOptimizer(learning_rate)
+        g_opt = tf.train.AdagradOptimizer(lr)
     elif optimizer == 'adam':
-        g_opt = tf.train.AdamOptimizer(learning_rate)
+        g_opt = tf.train.AdamOptimizer(lr)
     elif optimizer == 'rmsprop':
-        g_opt = tf.train.RMSPropOptimizer(learning_rate)
+        g_opt = tf.train.RMSPropOptimizer(lr)
     else:
-        g_opt = tf.train.GradientDescentOptimizer(learning_rate)
+        g_opt = tf.train.GradientDescentOptimizer(lr)
 
     g_optim = g_opt.minimize(g_loss, var_list=g_vars)
 
@@ -618,12 +628,13 @@ def build_model_mmd_gan_simple(batch_size, gen_num, data_num, data_test_num,
 	tf.summary.scalar("loss/loss1", loss1),
 	tf.summary.scalar("loss/loss2", loss2),
 	tf.summary.scalar("loss/mmd", mmd),
-	tf.summary.scalar("misc/lr", learning_rate),
+	tf.summary.scalar("misc/lr", lr),
     ])
 
     return (x, z, z_full, x_test, x_precompute, x_test_precompute,
             avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-            distances_xt_xp, g, g_full, mmd, loss1, loss2, g_optim, summary_op)
+            distances_xt_xp, g, g_full, mmd, loss1, loss2, lr_update, g_optim,
+            summary_op)
 
 
 def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
@@ -692,8 +703,6 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     else:
         g_optim = g_opt.minimize(g_loss, var_list=g_vars)
 
-
-
     # Define summary op for reporting.
     summary_op = tf.summary.merge([
 	tf.summary.scalar("loss/loss1", loss1),
@@ -753,13 +762,13 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     # TODO: Experimental. Putting scale on moment exponent.
     cmd_k = compute_cmd(x, g, k_moments=k_moments, use_tf=True, cmd_a=cmd_a,
         cmd_b=cmd_b, cmd_gamma=cmd_gamma)  
-    cmd_k_plus_1 = compute_cmd(x, g, k_moments=k_moments+1, use_tf=True,
+    cmd_k_minus_k_plus_1 = compute_cmd(x, g, k_moments=k_moments+1, use_tf=True,
         cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)
     mmd = compute_mmd(x, g, use_tf=True, slim_output=True)
     if cmd_variation == 'minus_k_plus_1':
-        cmd = 2 * cmd_k - cmd_k_plus_1  # With diverging k+1'th moment.
+        cmd = 2 * cmd_k - cmd_k_minus_k_plus_1  # With diverging k+1'th moment.
     elif cmd_variation == 'minus_mmd':
-        cmd = cmd_k - 0.1 * mmd  # With diverging k* > k moments.
+        cmd = cmd_k - 0.01 * mmd  # With diverging k* > k moments.
     else:
         cmd = cmd_k  # Normal CMD loss.
 
@@ -778,7 +787,7 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
     # Define optim nodes.
     # TODO: TEST CLIPPED GENERATOR.
-    clip = 1
+    clip = 0
     if clip:
         g_grads_, g_vars_ = zip(*g_opt.compute_gradients(g_loss, var_list=g_vars))
         g_grads_clipped_ = tuple(
@@ -846,12 +855,16 @@ def main():
         os.remove(g_out_file)
 
     # Build model.
-    if model_type == 'mmd_ae':
+    if model_type == 'ae_base':
+        # Define compact space for CMD.
+        cmd_a = np.min(data)
+        cmd_b = np.max(data)
         (x, x_full, x_test, x_precompute, x_test_precompute,
          avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-         distances_xt_xp, g, g_full, ae_loss, d_loss, mmd, loss1, loss2,
-         d_optim, summary_op) = build_model_mmd_ae(
-             batch_size, data_num, data_test_num, gen_num, out_dim, z_dim)
+         distances_xt_xp, g, g_full, ae_loss, d_loss, ae_base_loss, loss1,
+         loss2, lr_update, d_optim, summary_op) = build_model_ae_base(
+             batch_size, data_num, data_test_num, gen_num, out_dim, z_dim,
+             cmd_a, cmd_b)
 
     elif model_type == 'mmd_gan':
         (x, z, z_full, x_test, x_precompute, x_test_precompute,
@@ -863,7 +876,8 @@ def main():
     elif model_type == 'mmd_gan_simple':
         (x, z, z_full, x_test, x_precompute, x_test_precompute,
          avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-         distances_xt_xp, g, g_full, mmd, loss1, loss2, g_optim, summary_op) = \
+         distances_xt_xp, g, g_full, mmd, loss1, loss2, lr_update, g_optim,
+         summary_op) = \
             build_model_mmd_gan_simple(
                 batch_size, gen_num, data_num, data_test_num, out_dim, z_dim)
 
@@ -942,7 +956,7 @@ def main():
                 avg_dist_x_test_to_x: avg_dist_x_test_to_x_precomputed_}
 
             # Do an optimization step.
-            if model_type == 'mmd_ae':
+            if model_type == 'ae_base':
                 sess.run(d_optim, shared_feed_dict)
 
             elif model_type == 'mmd_gan':
@@ -962,15 +976,18 @@ def main():
             # Occasionally log/plot results.
             if step % log_step == 0 and step > 0:
                 # Read off from graph.
-                if model_type == 'mmd_ae':
-                    (d_loss_, ae_loss_, mmd_, g_batch_, summary_result,
+                if model_type == 'ae_base':
+                    (d_loss_, ae_loss_, ae_base_loss_, g_batch_, summary_result,
                      loss1_, loss2_) = sess.run(
-                        [d_loss, ae_loss, mmd, g, summary_op, loss1, loss2],
+                        [d_loss, ae_loss, ae_base_loss, g, summary_op, loss1,
+                         loss2],
                         shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, {x_full: data})
-                    print(('MMD_AE. Iter: {}, d_loss: {:.4f}, ae_loss: {:.4f}, '
-                           'mmd: {:.4f}, loss1: {:.4f}, loss2: {:.4f}').format(
-                            step, d_loss_, ae_loss_, mmd_, loss1_, loss2_))
+                    print(('AE_BASE. Iter: {}, d_loss: {:.4f}, '
+                           'ae_loss: {:.4f}, ae_base_loss: {:.4f}, '
+                           'loss1: {:.4f}, loss2: {:.4f}').format(
+                               step, d_loss_, ae_loss_, ae_base_loss_, loss1_,
+                               loss2_))
 
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
@@ -1008,10 +1025,16 @@ def main():
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, cmd_, mmd_, loss1_, loss2_))
 
-                # TODO: DIAGNOSE KMMD NaNs.
-                kmmd__ = compute_kmmd(data[:100], g_full_normed_[:100],
-                    sigma_list=[sigma], k_moments=k_moments,
-                    kernel_choice=kernel_choice, verbose=0)
+                # TODO: DIAGNOSE NaNs.
+                if model_type == 'ae_base':
+                    if np.isnan(ae_base_loss_):
+                        pdb.set_trace()
+                else:
+                    if np.isnan(mmd_):
+                        pdb.set_trace()
+                    kmmd__ = compute_kmmd(data[:100], g_full_normed_[:100],
+                        sigma_list=[sigma], k_moments=k_moments,
+                        kernel_choice=kernel_choice, verbose=0)
 
                 ###############################################################
                 # Unormalize data and simulations for all logs and plots.
