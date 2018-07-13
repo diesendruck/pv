@@ -20,7 +20,6 @@ from scipy.stats import multivariate_normal, shapiro
 """ This script runs several privacy-oriented MMD-GAN, CMD, and MMD+AE style
     generative models. 
 """
-    # TODO: Make ae_loss include both real and generated points!
 
 
 # Config.
@@ -31,8 +30,8 @@ parser.add_argument('--model_type', type=str, default='mmd_gan',
 parser.add_argument('--cmd_variation', type=str, default=None,
                      choices=['none', 'minus_k_plus_1', 'minus_mmd'])
 parser.add_argument('--ae_variation', type=str, default=None,
-                     choices=['pure', 'subset', 'cmd_k', 'mmd',
-                              'cmd_k_minus_k_plus_1'])
+                     choices=['pure', 'partition_encodings', 'subset', 'cmd_k',
+                              'mmd', 'cmd_k_minus_k_plus_1'])
 parser.add_argument('--data_num', type=int, default=10000)
 parser.add_argument('--data_dimension', type=int, default=1)
 parser.add_argument('--percent_train', type=float, default=0.9)
@@ -317,6 +316,7 @@ def add_nongraph_summary_items(summary_writer, step, dict_to_add):
 
 def avg_nearest_neighbor_distance(candidates, references, flag='noflag'):
     """Measures distance from candidate set to a reference set.
+    NOTE: This is not symmetric!
 
     For each element in candidate set, find distance to nearest neighbor in
     reference set. Return the average of these distances.
@@ -344,7 +344,9 @@ def avg_nearest_neighbor_distance(candidates, references, flag='noflag'):
 
         distances.append(smallest_dist)
 
+    # TODO: Use min, rather than mean, to measure worst-case scenario?
     avg_dist = tf.reduce_mean(distances)
+    #avg_dist = tf.reduce_min(distances)
     return avg_dist, distances
 
 
@@ -383,16 +385,25 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     # 3. Include loss on closeness/min distance from ae(x) to x.
     if ae_variation == 'pure':
         ae_base_loss = ae_loss
+    elif ae_variation == 'partition_encodings':
+        # Shuffle encodings, then MMD between first half and second half.
+        permuted_indices = np.random.permutation(batch_size)
+        p1_indices = permuted_indices[:batch_size/2]
+        p2_indices = permuted_indices[batch_size/2:]
+        enc_x_p1 = tf.gather(enc_x, p1_indices) 
+        enc_x_p2 = tf.gather(enc_x, p2_indices)
+        ae_base_loss = compute_mmd(enc_x_p1, enc_x_p2, use_tf=True,
+            slim_output=True)
     elif ae_variation == 'subset':
         # MMD between autoencodings of batch, and batch subset.
-        #   TODO: Should the percentage be an arg var?
         subset_indices = np.random.choice(
             batch_size, int(batch_size * 0.25), replace=False)  
         x_subset = tf.gather(x, subset_indices) 
         _, ae_x_subset, _, _ = autoencoder(x_subset,
             width=width, depth=depth, activation=activation, z_dim=z_dim,
             reuse=True)
-        ae_base_loss = compute_mmd(ae_x, x_subset, use_tf=True, slim_output=True)
+        ae_base_loss = compute_mmd(ae_x, x_subset, use_tf=True,
+            slim_output=True)
     elif ae_variation == 'mmd':
         # MMD between batch and autoencodings of batch.
         ae_base_loss = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
@@ -422,6 +433,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     loss1 = avg_dist_x_test_to_x - avg_dist_g_to_x 
     loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
 
+    mmd = compute_mmd(x, ae_x, use_tf=True, slim_output=True)
     #d_loss = mmd + loss1 + loss2
     #d_loss = ae_loss + mmd + 1e-1 * loss1 + 1e-1 * loss2
     d_loss = ae_loss + 2. * ae_base_loss#+ 2. * loss2 #+ loss1 + 2.0 * loss2
@@ -454,17 +466,18 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     # Define summary op for reporting.
     summary_op = tf.summary.merge([
 	tf.summary.scalar("loss/ae_loss", ae_loss),
-	tf.summary.scalar("loss/loss1", loss1),
-	tf.summary.scalar("loss/loss2", loss2),
 	tf.summary.scalar("loss/ae_base_loss", ae_base_loss),
 	tf.summary.scalar("loss/d_loss", d_loss),
+	tf.summary.scalar("loss/mmd", mmd),
+	tf.summary.scalar("loss/loss1", loss1),
+	tf.summary.scalar("loss/loss2", loss2),
 	tf.summary.scalar("misc/lr", lr),
     ])
 
     return (x, x_full, x_test, x_precompute, x_test_precompute,
             avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-            distances_xt_xp, g, g_full, ae_loss, d_loss, ae_base_loss, loss1,
-            loss2, lr_update, d_optim, summary_op)
+            distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd,
+            loss1, loss2, lr_update, d_optim, summary_op)
 
 
 def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
@@ -491,13 +504,16 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     g_full, _ = generator(
         z_full, width=width, depth=depth, activation=activation, out_dim=out_dim,
         reuse=True)
-    h_out, ae_out, enc_vars, dec_vars = autoencoder(tf.concat([x, g], 0),
+    ae_in = tf.concat([x, g], 0)
+    h_out, ae_out, enc_vars, dec_vars = autoencoder(ae_in,
         width=width, depth=depth, activation=activation, z_dim=z_dim,
         reuse=False)
     enc_x, enc_g = tf.split(h_out, [batch_size, gen_num])
     ae_x, ae_g = tf.split(ae_out, [batch_size, gen_num])
 
-    ae_loss = tf.reduce_mean(tf.square(ae_x - x))
+    # Compute autoencoder loss on both data and generations.
+    #ae_loss = tf.reduce_mean(tf.square(ae_x - x))
+    ae_loss = tf.reduce_mean(tf.square(ae_out - ae_in))
 
     # SET UP MMD LOSS.
     mmd = compute_mmd(enc_x, enc_g, use_tf=True, slim_output=True)
@@ -861,7 +877,7 @@ def main():
         cmd_b = np.max(data)
         (x, x_full, x_test, x_precompute, x_test_precompute,
          avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-         distances_xt_xp, g, g_full, ae_loss, d_loss, ae_base_loss, loss1,
+         distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd, loss1,
          loss2, lr_update, d_optim, summary_op) = build_model_ae_base(
              batch_size, data_num, data_test_num, gen_num, out_dim, z_dim,
              cmd_a, cmd_b)
@@ -977,17 +993,17 @@ def main():
             if step % log_step == 0 and step > 0:
                 # Read off from graph.
                 if model_type == 'ae_base':
-                    (d_loss_, ae_loss_, ae_base_loss_, g_batch_, summary_result,
-                     loss1_, loss2_) = sess.run(
-                        [d_loss, ae_loss, ae_base_loss, g, summary_op, loss1,
-                         loss2],
+                    (ae_loss_, ae_base_loss_, d_loss_, mmd_, g_batch_,
+                     summary_result, loss1_, loss2_) = sess.run(
+                        [ae_loss, ae_base_loss, d_loss, mmd, g, summary_op,
+                         loss1, loss2],
                         shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, {x_full: data})
-                    print(('AE_BASE. Iter: {}, d_loss: {:.4f}, '
-                           'ae_loss: {:.4f}, ae_base_loss: {:.4f}, '
+                    print(('AE_BASE. Iter: {}, ae_loss: {:.4f}, '
+                           'ae_base_loss: {:.4f}, d_loss: {:.4f}, mmd: {:.4f} '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
-                               step, d_loss_, ae_loss_, ae_base_loss_, loss1_,
-                               loss2_))
+                               step, ae_loss_, ae_base_loss_, d_loss_, mmd_,
+                               loss1_, loss2_))
 
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
@@ -1026,15 +1042,11 @@ def main():
                                step, cmd_, mmd_, loss1_, loss2_))
 
                 # TODO: DIAGNOSE NaNs.
-                if model_type == 'ae_base':
-                    if np.isnan(ae_base_loss_):
-                        pdb.set_trace()
-                else:
-                    if np.isnan(mmd_):
-                        pdb.set_trace()
-                    kmmd__ = compute_kmmd(data[:100], g_full_normed_[:100],
-                        sigma_list=[sigma], k_moments=k_moments,
-                        kernel_choice=kernel_choice, verbose=0)
+                if np.isnan(mmd_):
+                    pdb.set_trace()
+                kmmd__ = compute_kmmd(data[:100], g_full_normed_[:100],
+                    sigma_list=[sigma], k_moments=k_moments,
+                    kernel_choice=kernel_choice, verbose=0)
 
                 ###############################################################
                 # Unormalize data and simulations for all logs and plots.
