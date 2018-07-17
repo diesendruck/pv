@@ -45,16 +45,6 @@ def get_mmd_from_K(K, n1, n2, use_tf=False):
     return mmd
 
 
-def compute_central_moments(d, k_moments=2):
-    """Computes central moments of data in NumPy array."""
-    d_mean = np.mean(d, axis=0)
-    moments_data = [list(np.round(d_mean, 4))]
-    for i in range(2, k_moments + 1):
-        moment_i_data = np.mean(np.power(d - d_mean, i), axis=0)
-        moments_data.append(list(np.round(moment_i_data, 4)))
-    return moments_data
-
-
 def compute_mmd(arr1, arr2, sigma_list=None, use_tf=False, slim_output=False):
     """Computes mmd between two numpy arrays of same size."""
     if sigma_list is None:
@@ -229,8 +219,28 @@ def compute_kmmd(arr1, arr2, k_moments=2, kernel_choice='rbf_taylor',
             return kmmd, K 
 
 
+def compute_central_moments(d, k_moments=2, use_tf=False):
+    """Computes central moments of data in NumPy array."""
+    if use_tf:
+        d_mean = tf.reduce_mean(d, axis=0)
+        d_moments = [d_mean]
+        for i in range(2, k_moments + 1):
+            d_moment_i = tf.reduce_mean(tf.pow(d - d_mean, i), axis=0)
+            d_moments.append(d_moment_i)
+        return d_moments
+
+    else:
+        d_mean = np.mean(d, axis=0)
+        #d_moments = [list(np.round(d_mean, 4))]
+        d_moments = [d_mean]
+        for i in range(2, k_moments + 1):
+            d_moment_i = np.mean(np.power(d - d_mean, i), axis=0)
+            d_moments.append(d_moment_i)
+        return d_moments
+
+
 def compute_cmd(arr1, arr2, k_moments=2, use_tf=False, cmd_a=None, cmd_b=None,
-        cmd_gamma=1.0):
+        return_terms=False):
     """Computes Central Moment Discrepancy between two numpy arrays of same size.
 
     cmd_a: Min on data.
@@ -241,21 +251,34 @@ def compute_cmd(arr1, arr2, k_moments=2, use_tf=False, cmd_a=None, cmd_b=None,
     
     """
     assert (cmd_a is not None) and (cmd_b is not None), 'define cmd_a, cmd_b'
-    assert (cmd_gamma >= 0.0) and (cmd_gamma <= 2.0), 'cmd_gamma must be on [0, 2]'
     span_const = 1. / np.abs(cmd_b - cmd_a)
+
+    # Cumulatively sum the CMD, and also collect individual terms.
+    cmd = 0
+    terms = []
 
     if use_tf:
         arr1_mean = tf.reduce_mean(arr1, axis=0)
         arr2_mean = tf.reduce_mean(arr2, axis=0)
 
-        cmd = span_const * tf.norm(arr1_mean - arr2_mean, ord=2)
+        first_term = span_const * tf.norm(arr1_mean - arr2_mean, ord=2)
+        cmd += first_term
+        terms.append(first_term)
+
         for k in range(2, k_moments + 1):
-            cmd += span_const**(k * cmd_gamma) * tf.norm(
+            # Compute k'th moment, and add to collections.
+            term_k = (span_const**k) * tf.norm(
                 tf.reduce_mean(tf.pow(arr1 - arr1_mean, k), axis=0) -
                 tf.reduce_mean(tf.pow(arr2 - arr2_mean, k), axis=0))
-        return cmd 
+            cmd += term_k
+            terms.append(term_k)
+
+        if return_terms:
+            return cmd, terms 
+        else:
+            return cmd
         
-    elif not use_tf:
+    else:
         if len(arr1.shape) == 1:
             arr1 = np.reshape(arr1, [-1, 1])
             arr2 = np.reshape(arr2, [-1, 1])
@@ -263,20 +286,19 @@ def compute_cmd(arr1, arr2, k_moments=2, use_tf=False, cmd_a=None, cmd_b=None,
         arr1_mean = np.mean(arr1, axis=0)
         arr2_mean = np.mean(arr2, axis=0)
 
-        # Store moments for diagnostics.
-        moments_data = [list(np.round(arr1_mean, 4))]
-        moments_gens = [list(np.round(arr2_mean, 4))]
+        first_term = span_const * np.linalg.norm(arr1_mean - arr2_mean)
+        cmd += first_term
+        terms.append(first_term)
 
-        cmd = span_const * np.linalg.norm(arr1_mean - arr2_mean)
         for k in range(2, k_moments + 1):
-            # Compute moments and add to metric.
-            moment_k_data = np.mean(np.power(arr1 - arr1_mean, k), axis=0)
-            moment_k_gens = np.mean(np.power(arr2 - arr2_mean, k), axis=0)
-            cmd += span_const**(k * cmd_gamma) * \
-                np.linalg.norm(moment_k_data - moment_k_gens)
+            # Compute k'th moment, and add to collections.
+            term_k = (span_const**k) * np.linalg.norm(
+                np.mean(np.power(arr1 - arr1_mean, k), axis=0) -
+                np.mean(np.power(arr2 - arr2_mean, k), axis=0))
+            cmd += term_k
+            terms.append(term_k)
 
-            # Store moments.
-            moments_data.append(list(np.round(moment_k_data, 4)))
-            moments_gens.append(list(np.round(moment_k_gens, 4)))
-
-        return cmd, moments_data, moments_gens 
+        if return_terms:
+            return cmd, terms
+        else:
+            return cmd

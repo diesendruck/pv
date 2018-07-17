@@ -28,10 +28,11 @@ parser.add_argument('--model_type', type=str, default='mmd_gan',
                     choices=['ae_base', 'mmd_gan', 'mmd_gan_simple',
                              'kmmd_gan', 'cmd_gan'])
 parser.add_argument('--cmd_variation', type=str, default=None,
-                     choices=['none', 'minus_k_plus_1', 'minus_mmd'])
+                     choices=['none', 'minus_k_plus_1', 'minus_mmd',
+                              'prog_cmd'])
 parser.add_argument('--ae_variation', type=str, default=None,
-                     choices=['pure', 'partition_encodings', 'subset', 'cmd_k',
-                              'mmd', 'cmd_k_minus_k_plus_1'])
+                     choices=['pure', 'partition_ae_data', 'partition_enc_enc',
+                              'subset', 'cmd_k', 'mmd', 'cmd_k_minus_k_plus_1'])
 parser.add_argument('--data_num', type=int, default=10000)
 parser.add_argument('--data_dimension', type=int, default=1)
 parser.add_argument('--percent_train', type=float, default=0.9)
@@ -53,7 +54,6 @@ parser.add_argument('--k_moments', type=int, default=2)
 parser.add_argument('--kernel_choice', type=str, default='rbf_taylor',
                     choices=['poly', 'rbf_taylor'])
 parser.add_argument('--sigma', type=int, default=1)
-parser.add_argument('--cmd_gamma', type=float, default=1.0)
 parser.add_argument('--tag', type=str, default='test')
 parser.add_argument('--load_existing', default=False, action='store_true',
                     dest='load_existing')
@@ -78,7 +78,6 @@ data_file = args.data_file
 k_moments = args.k_moments
 kernel_choice = args.kernel_choice
 sigma = args.sigma
-cmd_gamma = args.cmd_gamma
 tag = args.tag
 load_existing = args.load_existing
 
@@ -95,9 +94,11 @@ def get_random_z(gen_num, z_dim):
 
 def dense(x, width, activation, batch_residual=False):
     if not batch_residual:
-        return layers.dense(x, width, activation=activation)
+        x_ = layers.dense(x, width, activation=activation)
+        return layers.batch_normalization(x_)
     else:
-        x_ = layers.dense(x, width, activation=activation, use_bias=False)
+        # TODO: Should this use bias?
+        x_ = layers.dense(x, width, activation=activation, use_bias=True)
         return layers.batch_normalization(x_) + x
 
 
@@ -106,20 +107,22 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
     """Decodes. Generates output, given noise input."""
     out_dim = x.shape[1]
     with tf.variable_scope('encoder', reuse=reuse) as vs_enc:
-        x = layers.dense(x, width, activation=activation)
+        x = dense(x, width, activation=activation)
 
         for idx in range(depth - 1):
+            # TODO: Should this use batch resid, and is it defined properly?
             x = dense(x, width, activation=activation, batch_residual=True)
 
-        h = layers.dense(x, z_dim, activation=None)
+        h = dense(x, z_dim, activation=None)
 
     with tf.variable_scope('decoder', reuse=reuse) as vs_dec:
-        x = layers.dense(h, width, activation=activation)
+        x = dense(h, width, activation=activation)
 
         for idx in range(depth - 1):
+            # TODO: Should this use batch resid, and is it defined properly?
             x = dense(x, width, activation=activation, batch_residual=True)
 
-        ae = layers.dense(x, out_dim, activation=None)
+        ae = dense(x, out_dim, activation=None)
 
     vars_enc = tf.contrib.framework.get_variables(vs_enc)
     vars_dec = tf.contrib.framework.get_variables(vs_dec)
@@ -133,57 +136,12 @@ def generator(z, width=3, depth=3, activation=tf.nn.elu, out_dim=2,
         x = dense(z, width, activation=activation)
 
         for idx in range(depth - 1):
+            # TODO: Should this use batch resid, and is it defined properly?
             x = dense(x, width, activation=activation, batch_residual=True)
 
         out = dense(x, out_dim, activation=None)
     vars_g = tf.contrib.framework.get_variables(vs_g)
     return out, vars_g
-
-
-def evaluate_presence_risk(train, test, sim, ball_radius=1e-2):
-    """Assess privacy of simulations.
-    
-    Compute True Pos., True Neg., False Pos., and False Neg. rates of
-    finding a neighbor in the simulations, for each of a subset of training
-    data and a subset of test data.
-
-    Args:
-      train: Numpy array of all training data.
-      test: Numpy array of all test data (smaller than train).
-      sim: Numpy array of simulations.
-      ball_radius: Float, distance from point to sim that qualifies as match.
-
-    Return:
-      sensitivity: Float of TP / (TP + FN).
-      precision: Float of TP / (TP + FP).
-    """
-    # TODO: Should sensitivity be a loss, rather than just be reported?
-    assert len(test) < len(train), 'test should be smaller than train'
-    num_samples = len(test)
-    compromised_records = train[:num_samples]
-    tp, tn, fp, fn = 0, 0, 0, 0
-
-    # Count true positives and false negatives.
-    for i in compromised_records:
-        distances_from_i = norm(i - sim, axis=1)
-        has_neighbor = np.any(distances_from_i < ball_radius)
-        if has_neighbor:
-            tp += 1
-        else:
-            fn += 1
-    # Count false positives and true negatives.
-    for i in test:
-        distances_from_i = norm(i - sim, axis=1)
-        has_neighbor = np.any(distances_from_i < ball_radius)
-        if has_neighbor:
-            fp += 1
-        else:
-            tn += 1
-
-    sensitivity = float(tp) / (tp + fn)
-    precision = float(tp + 1e-10) / (tp + fp + 1e-10)
-    false_positive_rate = float(fp) / (fp + tn)
-    return (sensitivity, precision, false_positive_rate, tp, fn, fp, tn)
 
 
 def load_checkpoint(saver, sess, checkpoint_dir):
@@ -278,7 +236,7 @@ def compute_moments(arr, k_moments=2):
 
 
 def prepare_dirs(load_existing):
-    log_dir = 'logs_{}'.format(tag)
+    log_dir = 'logs/logs_{}'.format(tag)
     checkpoint_dir = os.path.join(log_dir, 'checkpoints')
     plot_dir = os.path.join(log_dir, 'plots')
     g_out_dir = os.path.join(log_dir, 'g_out')
@@ -337,35 +295,80 @@ def avg_nearest_neighbor_distance(candidates, references, flag='noflag'):
 
         assert d_from_i_reshaped.shape.as_list() == [1, references.shape[0]]
         distances_negative = -1.0 * d_from_i_reshaped
-        #distances_negative = -1.0 * distances_from_i
+        #distances_negative = -1.0 * distances_from_i  # OLD
         smallest_dist_negative, _ =  tf.nn.top_k(distances_negative, name=flag)
         assert smallest_dist_negative.shape.as_list() == [1, 1]
         smallest_dist = -1.0 * smallest_dist_negative[0]
 
         distances.append(smallest_dist)
 
-    # TODO: Use min, rather than mean, to measure worst-case scenario?
     avg_dist = tf.reduce_mean(distances)
-    #avg_dist = tf.reduce_min(distances)
     return avg_dist, distances
+
+
+def evaluate_presence_risk(train, test, sim, ball_radius=1e-2):
+    """Assess privacy of simulations.
+    
+    Compute True Pos., True Neg., False Pos., and False Neg. rates of
+    finding a neighbor in the simulations, for each of a subset of training
+    data and a subset of test data.
+
+    Args:
+      train: Numpy array of all training data.
+      test: Numpy array of all test data (smaller than train).
+      sim: Numpy array of simulations.
+      ball_radius: Float, distance from point to sim that qualifies as match.
+
+    Return:
+      sensitivity: Float of TP / (TP + FN).
+      precision: Float of TP / (TP + FP).
+    """
+    # TODO: Sensitivity as a loss, rather than just be reported?
+    # TODO: Count nearest neighbors, rather than presence in epsilon-ball?
+    assert len(test) < len(train), 'test should be smaller than train'
+    num_samples = len(test)
+    compromised_records = train[:num_samples]
+    tp, tn, fp, fn = 0, 0, 0, 0
+
+    # Count true positives and false negatives.
+    for i in compromised_records:
+        distances_from_i = norm(i - sim, axis=1)
+        has_neighbor = np.any(distances_from_i < ball_radius)
+        if has_neighbor:
+            tp += 1
+        else:
+            fn += 1
+    # Count false positives and true negatives.
+    for i in test:
+        distances_from_i = norm(i - sim, axis=1)
+        has_neighbor = np.any(distances_from_i < ball_radius)
+        if has_neighbor:
+            fp += 1
+        else:
+            tn += 1
+
+    sensitivity = float(tp) / (tp + fn)
+    precision = float(tp + 1e-10) / (tp + fp + 1e-10)
+    false_positive_rate = float(fp) / (fp + tn)
+    return (sensitivity, precision, false_positive_rate, tp, fn, fp, tn)
 
 
 def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         z_dim, cmd_a, cmd_b):
     # Placeholders to precompute avg distance from data_test to data.
-    x_precompute = tf.placeholder(tf.float32, [data_num, out_dim],
+    x_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_precompute')
     x_test_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_test_precompute')
-    avg_dist_x_test_to_x_precomputed, distances_xt_xp = \
-        avg_nearest_neighbor_distance(x_test_precompute, x_precompute)
+    avg_dist_x_to_x_test_precomputed, distances_xt_xp = \
+        avg_nearest_neighbor_distance(x_precompute, x_test_precompute)
 
     # Regular training placeholders.
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
     x_full = tf.placeholder(tf.float32, [data_num, out_dim], name='x_full')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
-    avg_dist_x_test_to_x = tf.placeholder(tf.float32, shape=(),
-        name='avg_dist_x_test_to_x')
+    avg_dist_x_to_x_test = tf.placeholder(tf.float32, shape=(),
+        name='avg_dist_x_to_x_test')
 
     # Autoencoder.
     enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
@@ -385,7 +388,17 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     # 3. Include loss on closeness/min distance from ae(x) to x.
     if ae_variation == 'pure':
         ae_base_loss = ae_loss
-    elif ae_variation == 'partition_encodings':
+        d_loss = ae_loss 
+    elif ae_variation == 'partition_ae_data':
+        # Shuffle encodings, then MMD between first half and second half.
+        permuted_indices = np.random.permutation(batch_size)
+        p1_indices = permuted_indices[:batch_size/2]
+        p2_indices = permuted_indices[batch_size/2:]
+        ae_x_p1 = tf.gather(ae_x, p1_indices)  # Get encodings for one partition.
+        x_p2 = tf.gather(x, p2_indices)  # Compare to raw for other partition.
+        ae_base_loss = compute_mmd(ae_x_p1, x_p2, use_tf=True, slim_output=True)
+        d_loss = 1.5 * ae_loss + 10. * ae_base_loss
+    elif ae_variation == 'partition_enc_enc':
         # Shuffle encodings, then MMD between first half and second half.
         permuted_indices = np.random.permutation(batch_size)
         p1_indices = permuted_indices[:batch_size/2]
@@ -394,6 +407,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         enc_x_p2 = tf.gather(enc_x, p2_indices)
         ae_base_loss = compute_mmd(enc_x_p1, enc_x_p2, use_tf=True,
             slim_output=True)
+        d_loss = ae_loss + 10. * ae_base_loss
     elif ae_variation == 'subset':
         # MMD between autoencodings of batch, and batch subset.
         subset_indices = np.random.choice(
@@ -404,25 +418,29 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
             reuse=True)
         ae_base_loss = compute_mmd(ae_x, x_subset, use_tf=True,
             slim_output=True)
+        d_loss = 0.1 * ae_loss + 10. * ae_base_loss
     elif ae_variation == 'mmd':
         # MMD between batch and autoencodings of batch.
         ae_base_loss = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
+        d_loss = ae_loss + 2. * ae_base_loss
     elif ae_variation == 'cmd_k':
         # CMD between batch and autoencodings of batch.
         ae_base_loss = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True,
-            cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)  
+            cmd_a=cmd_a, cmd_b=cmd_b)  
+        d_loss = ae_loss + 2. * ae_base_loss
     elif ae_variation == 'cmd_k_minus_k_plus_1':
         # Same as above, but with diverging k+1'th moment.
         cmd_k = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True,
-            cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)  
+            cmd_a=cmd_a, cmd_b=cmd_b)  
         cmd_k_minus_k_plus_1 = compute_cmd(ae_x, x, k_moments=k_moments+1,
-            use_tf=True, cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)
+            use_tf=True, cmd_a=cmd_a, cmd_b=cmd_b)
         ae_base_loss = 2 * cmd_k - cmd_k_minus_k_plus_1
+        d_loss = ae_loss + 2. * ae_base_loss
 
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
     avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
-    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_test_to_x)
+    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_to_x_test)
     # Data as close to simulations as heldout to simulations.
     # Simulation as close to data as simulation is to heldoout. 
     #TODO: This measure isn't symmetric. Should it be ^^^ this other way instead?
@@ -430,13 +448,12 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
     avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
     #loss2 = tf.abs(avg_dist_x_to_g - avg_dist_x_test_to_g)
-    loss1 = avg_dist_x_test_to_x - avg_dist_g_to_x 
+    loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g 
     loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
 
     mmd = compute_mmd(x, ae_x, use_tf=True, slim_output=True)
     #d_loss = mmd + loss1 + loss2
     #d_loss = ae_loss + mmd + 1e-1 * loss1 + 1e-1 * loss2
-    d_loss = ae_loss + 2. * ae_base_loss#+ 2. * loss2 #+ loss1 + 2.0 * loss2
 
     lr = tf.Variable(learning_rate, name='lr', trainable=False)
     lr_update = tf.assign(lr, tf.maximum(lr * 0.8, 1e-8), name='lr_update')
@@ -475,7 +492,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     ])
 
     return (x, x_full, x_test, x_precompute, x_test_precompute,
-            avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
+            avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd,
             loss1, loss2, lr_update, d_optim, summary_op)
 
@@ -483,12 +500,12 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
 def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         z_dim):
     # Placeholders to precompute avg distance from data_test to data.
-    x_precompute = tf.placeholder(tf.float32, [data_num, out_dim],
+    x_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_precompute')
     x_test_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_test_precompute')
-    avg_dist_x_test_to_x_precomputed, distances_xt_xp = \
-        avg_nearest_neighbor_distance(x_test_precompute, x_precompute,
+    avg_dist_x_to_x_test_precomputed, distances_xt_xp = \
+        avg_nearest_neighbor_distance(x_precompute, x_test_precompute,
             flag='xt_to_xp')
 
     # Regular training placeholders.
@@ -496,8 +513,8 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     z = tf.placeholder(tf.float32, [gen_num, z_dim], name='z')
     z_full = tf.placeholder(tf.float32, [data_num, z_dim], name='z_full')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
-    avg_dist_x_test_to_x = tf.placeholder(tf.float32, shape=(),
-        name='avg_dist_x_test_to_x')
+    avg_dist_x_to_x_test = tf.placeholder(tf.float32, shape=(),
+        name='avg_dist_x_to_x_test')
 
     g, g_vars = generator(
         z, width=width, depth=depth, activation=activation, out_dim=out_dim)
@@ -521,7 +538,7 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
     avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x, flag='g_to_x')
-    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_test_to_x)
+    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_to_x_test)
 
     # Data as close to simulations as heldout to simulations.
     # (Simulations don't reveal "source", in being closer to data than to heldout.
@@ -533,7 +550,7 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     # TODO: Should this loss be one-sided? i.e. just want x_to_g > x_test_to_g.
     margin = 0.00
     #loss2 = tf.nn.relu(avg_dist_x_test_to_g - avg_dist_x_to_g + margin)
-    loss1 = avg_dist_x_test_to_x - avg_dist_g_to_x
+    loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g
     loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
 
     #d_loss = ae_loss - 2.0 * mmd - loss1 - loss2
@@ -543,18 +560,20 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     d_loss = 0.1 * ae_loss - mmd
     g_loss = mmd
 
+    lr = tf.Variable(learning_rate, name='lr', trainable=False)
+    lr_update = tf.assign(lr, tf.maximum(lr * 0.8, 1e-8), name='lr_update')
     if optimizer == 'adagrad':
-        d_opt = tf.train.AdagradOptimizer(learning_rate)
-        g_opt = tf.train.AdagradOptimizer(learning_rate)
+        d_opt = tf.train.AdagradOptimizer(lr)
+        g_opt = tf.train.AdagradOptimizer(lr)
     elif optimizer == 'adam':
-        d_opt = tf.train.AdamOptimizer(learning_rate)
-        g_opt = tf.train.AdamOptimizer(learning_rate)
+        d_opt = tf.train.AdamOptimizer(lr)
+        g_opt = tf.train.AdamOptimizer(lr)
     elif optimizer == 'rmsprop':
-        d_opt = tf.train.RMSPropOptimizer(learning_rate)
-        g_opt = tf.train.RMSPropOptimizer(learning_rate)
+        d_opt = tf.train.RMSPropOptimizer(lr)
+        g_opt = tf.train.RMSPropOptimizer(lr)
     else:
-        d_opt = tf.train.GradientDescentOptimizer(learning_rate)
-        g_opt = tf.train.GradientDescentOptimizer(learning_rate)
+        d_opt = tf.train.GradientDescentOptimizer(lr)
+        g_opt = tf.train.GradientDescentOptimizer(lr)
 
     # Define optim nodes.
     # Clip encoder gradients.
@@ -575,32 +594,32 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 	tf.summary.scalar("loss/loss2", loss2),
 	tf.summary.scalar("loss/mmd", mmd),
 	tf.summary.scalar("loss/d_loss", d_loss),
-	tf.summary.scalar("misc/lr", learning_rate),
+	tf.summary.scalar("misc/lr", lr),
     ])
 
     return (x, z, z_full, x_test, x_precompute, x_test_precompute,
-            avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
+            avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, g, g_full, ae_loss, d_loss, mmd, loss1, loss2,
-            d_optim, g_optim, summary_op)
+            lr_update, d_optim, g_optim, summary_op)
 
 
 def build_model_mmd_gan_simple(batch_size, gen_num, data_num, data_test_num,
         out_dim, z_dim):
     # Placeholders to precompute avg distance from data_test to data.
-    x_precompute = tf.placeholder(tf.float32, [data_num, out_dim],
+    x_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_precompute')
     x_test_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_test_precompute')
-    avg_dist_x_test_to_x_precomputed, distances_xt_xp = \
-        avg_nearest_neighbor_distance(x_test_precompute, x_precompute)
+    avg_dist_x_to_x_test_precomputed, distances_xt_xp = \
+        avg_nearest_neighbor_distance(x_precompute, x_test_precompute)
 
     # Regular training placeholders.
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
     z = tf.placeholder(tf.float32, [gen_num, z_dim], name='z')
     z_full = tf.placeholder(tf.float32, [data_num, z_dim], name='z_full')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
-    avg_dist_x_test_to_x = tf.placeholder(tf.float32, shape=(),
-        name='avg_dist_x_test_to_x')
+    avg_dist_x_to_x_test = tf.placeholder(tf.float32, shape=(),
+        name='avg_dist_x_to_x_test')
 
     g, g_vars = generator(
         z, width=width, depth=depth, activation=activation, out_dim=out_dim)
@@ -614,14 +633,14 @@ def build_model_mmd_gan_simple(batch_size, gen_num, data_num, data_test_num,
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
     avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
-    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_test_to_x)
+    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_to_x_test)
 
     # Data as close to simulations as heldout to simulations.
     # (Simulations don't reveal "source", in being closer to data than to heldout.
     avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
     avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
     #loss2 = tf.abs(avg_dist_x_to_g - avg_dist_x_test_to_g)
-    loss1 = avg_dist_x_test_to_x - avg_dist_g_to_x
+    loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g
     loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
 
     g_loss = mmd
@@ -648,7 +667,7 @@ def build_model_mmd_gan_simple(batch_size, gen_num, data_num, data_test_num,
     ])
 
     return (x, z, z_full, x_test, x_precompute, x_test_precompute,
-            avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
+            avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, g, g_full, mmd, loss1, loss2, lr_update, g_optim,
             summary_op)
 
@@ -656,20 +675,20 @@ def build_model_mmd_gan_simple(batch_size, gen_num, data_num, data_test_num,
 def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         z_dim):
     # Placeholders to precompute avg distance from data_test to data.
-    x_precompute = tf.placeholder(tf.float32, [data_num, out_dim],
+    x_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_precompute')
     x_test_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_test_precompute')
-    avg_dist_x_test_to_x_precomputed, distances_xt_xp = \
-        avg_nearest_neighbor_distance(x_test_precompute, x_precompute)
+    avg_dist_x_to_x_test_precomputed, distances_xt_xp = \
+        avg_nearest_neighbor_distance(x_precompute, x_test_precompute)
 
     # Regular training placeholders.
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
     z = tf.placeholder(tf.float32, [gen_num, z_dim], name='z')
     z_full = tf.placeholder(tf.float32, [data_num, z_dim], name='z_full')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
-    avg_dist_x_test_to_x = tf.placeholder(tf.float32, shape=(),
-        name='avg_dist_x_test_to_x')
+    avg_dist_x_to_x_test = tf.placeholder(tf.float32, shape=(),
+        name='avg_dist_x_to_x_test')
 
     g, g_vars = generator(
         z, width=width, depth=depth, activation=activation, out_dim=out_dim)
@@ -685,7 +704,7 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
     avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
-    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_test_to_x)
+    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_to_x_test)
 
     # Data as close to simulations as heldout to simulations.
     # (Simulations don't reveal "source", in being closer to data than to heldout.
@@ -693,7 +712,7 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
     # TODO: As a strictly reported value, should this be without abs()? I think so.
     #loss2 = tf.abs(avg_dist_x_to_g - avg_dist_x_test_to_g)
-    loss1 = avg_dist_x_test_to_x - avg_dist_g_to_x
+    loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g
     loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
 
     #g_loss = mmd + loss1 + loss2
@@ -727,8 +746,8 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 	tf.summary.scalar("misc/lr", learning_rate),
     ])
 
-    return (x, z, z_full, x_test, avg_dist_x_test_to_x, x_precompute,
-            x_test_precompute, avg_dist_x_test_to_x_precomputed,
+    return (x, z, z_full, x_test, avg_dist_x_to_x_test, x_precompute,
+            x_test_precompute, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, g, g_full, kmmd, mmd, loss1, loss2, g_optim,
             summary_op)
 
@@ -736,20 +755,22 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         z_dim, cmd_a, cmd_b):
     # Placeholders to precompute avg distance from data_test to data.
-    x_precompute = tf.placeholder(tf.float32, [data_num, out_dim],
+    x_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_precompute')
     x_test_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_test_precompute')
-    avg_dist_x_test_to_x_precomputed, distances_xt_xp = \
-        avg_nearest_neighbor_distance(x_test_precompute, x_precompute)
+    avg_dist_x_to_x_test_precomputed, distances_xt_xp = \
+        avg_nearest_neighbor_distance(x_precompute, x_test_precompute)
 
     # Regular training placeholders.
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
     z = tf.placeholder(tf.float32, [gen_num, z_dim], name='z')
     z_full = tf.placeholder(tf.float32, [data_num, z_dim], name='z_full')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
-    avg_dist_x_test_to_x = tf.placeholder(tf.float32, shape=(),
-        name='avg_dist_x_test_to_x')
+    avg_dist_x_to_x_test = tf.placeholder(tf.float32, shape=(),
+        name='avg_dist_x_to_x_test')
+    prog_cmd_coefs = tf.placeholder(tf.float32, shape=(k_moments),
+        name='prog_cmd_coefs')
 
     g, g_vars = generator(
         z, width=width, depth=depth, activation=activation, out_dim=out_dim)
@@ -760,7 +781,7 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     # Simulations as close to data as heldouts are to data.
     # (Simulations aren't overfitting.)
     avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
-    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_test_to_x)
+    #loss1 = tf.abs(avg_dist_g_to_x - avg_dist_x_to_x_test)
 
     # Data as close to simulations as heldout to simulations.
     # (Simulations don't reveal "source", in being closer to data than to heldout.
@@ -770,21 +791,23 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     #margin = 0.05
     #loss2 = tf.nn.relu(avg_dist_x_test_to_g - avg_dist_x_to_g + margin)
     #loss2 = tf.abs((avg_dist_x_to_g + margin) - avg_dist_x_test_to_g)
-    loss1 = avg_dist_x_test_to_x - avg_dist_g_to_x
+    loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g
     loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
 
     # SET UP CMD LOSS.
 
     # TODO: Experimental. Putting scale on moment exponent.
-    cmd_k = compute_cmd(x, g, k_moments=k_moments, use_tf=True, cmd_a=cmd_a,
-        cmd_b=cmd_b, cmd_gamma=cmd_gamma)  
+    cmd_k, cmd_k_terms = compute_cmd(x, g, k_moments=k_moments, use_tf=True,
+        cmd_a=cmd_a, cmd_b=cmd_b, return_terms=True)  
     cmd_k_minus_k_plus_1 = compute_cmd(x, g, k_moments=k_moments+1, use_tf=True,
-        cmd_a=cmd_a, cmd_b=cmd_b, cmd_gamma=cmd_gamma)
+        cmd_a=cmd_a, cmd_b=cmd_b)
     mmd = compute_mmd(x, g, use_tf=True, slim_output=True)
     if cmd_variation == 'minus_k_plus_1':
         cmd = 2 * cmd_k - cmd_k_minus_k_plus_1  # With diverging k+1'th moment.
     elif cmd_variation == 'minus_mmd':
         cmd = cmd_k - 0.01 * mmd  # With diverging k* > k moments.
+    elif cmd_variation == 'prog_cmd':
+        cmd = tf.reduce_sum(prog_cmd_coefs * cmd_k_terms) # Progressively include higher moments.
     else:
         cmd = cmd_k  # Normal CMD loss.
 
@@ -822,9 +845,9 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     ])
 
     return (x, z, z_full, x_test, x_precompute, x_test_precompute,
-            avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-            distances_xt_xp, g, g_full, cmd, mmd, loss1, loss2, lr_update,
-            g_optim, summary_op)
+            avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
+            distances_xt_xp, prog_cmd_coefs, cmd_k_terms, g, g_full, cmd, mmd,
+            loss1, loss2, lr_update, g_optim, summary_op)
 
 
 def main():
@@ -876,7 +899,7 @@ def main():
         cmd_a = np.min(data)
         cmd_b = np.max(data)
         (x, x_full, x_test, x_precompute, x_test_precompute,
-         avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
+         avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd, loss1,
          loss2, lr_update, d_optim, summary_op) = build_model_ae_base(
              batch_size, data_num, data_test_num, gen_num, out_dim, z_dim,
@@ -884,22 +907,22 @@ def main():
 
     elif model_type == 'mmd_gan':
         (x, z, z_full, x_test, x_precompute, x_test_precompute,
-         avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
+         avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, g, g_full, ae_loss, d_loss, mmd, loss1, loss2,
-         d_optim, g_optim, summary_op) = build_model_mmd_gan(
+         lr_update, d_optim, g_optim, summary_op) = build_model_mmd_gan(
              batch_size, gen_num, data_num, data_test_num, out_dim, z_dim)
 
     elif model_type == 'mmd_gan_simple':
         (x, z, z_full, x_test, x_precompute, x_test_precompute,
-         avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
+         avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, g, g_full, mmd, loss1, loss2, lr_update, g_optim,
          summary_op) = \
             build_model_mmd_gan_simple(
                 batch_size, gen_num, data_num, data_test_num, out_dim, z_dim)
 
     elif model_type == 'kmmd_gan':
-        (x, z, z_full, x_test, avg_dist_x_test_to_x, x_precompute,
-         x_test_precompute, avg_dist_x_test_to_x_precomputed,
+        (x, z, z_full, x_test, avg_dist_x_to_x_test, x_precompute,
+         x_test_precompute, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, g, g_full, kmmd, mmd, loss1, loss2, g_optim,
          summary_op) = build_model_kmmd_gan(
                 batch_size, gen_num, data_num, data_test_num, out_dim, z_dim)
@@ -909,12 +932,12 @@ def main():
         cmd_a = np.min(data)
         cmd_b = np.max(data)
         (x, z, z_full, x_test, x_precompute, x_test_precompute,
-         avg_dist_x_test_to_x, avg_dist_x_test_to_x_precomputed,
-         distances_xt_xp, g, g_full, cmd, mmd, loss1, loss2, lr_update, g_optim,
-         summary_op) = build_model_cmd_gan(
+         avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
+         distances_xt_xp, prog_cmd_coefs, cmd_k_terms, g, g_full, cmd, mmd,
+         loss1, loss2, lr_update, g_optim, summary_op) = build_model_cmd_gan(
                 batch_size, gen_num, data_num, data_test_num, out_dim, z_dim,
                 cmd_a, cmd_b)
-        print('cmd_gamma: {:.2f}'.format(1.0 / (np.abs(cmd_b - cmd_a))))
+        print('cmd_span_const: {:.2f}'.format(1.0 / (np.abs(cmd_b - cmd_a))))
 
     ###########################################################################
     # Start session.
@@ -939,21 +962,21 @@ def main():
             load_step = 0
 
         # Once, compute average distance from heldout data to training data.
-        avg_dist_x_test_to_x_precomputed_, distances_xt_xp_ = sess.run(
-            [avg_dist_x_test_to_x_precomputed, distances_xt_xp],
+        avg_dist_x_to_x_test_precomputed_, _ = sess.run(
+            [avg_dist_x_to_x_test_precomputed, distances_xt_xp],
             feed_dict=
-                {x_precompute: data,
+                {x_precompute: data[:len(data_test)],
                  x_test_precompute: data_test})
 
         # Containers to hold empirical and relative errors of moments.
         empirical_moments_gens = np.zeros(
             ((max_step - load_step) / log_step, k_moments+1))
-
         do_relative = 1
         if do_relative:
             relative_error_of_moments = np.zeros(
                 ((max_step - load_step) / log_step, k_moments+1))
             reom = relative_error_of_moments
+
 
         #######################################################################
         # train()
@@ -969,7 +992,7 @@ def main():
             shared_feed_dict = {
                 x: random_batch_data,
                 x_test: random_batch_data_test,
-                avg_dist_x_test_to_x: avg_dist_x_test_to_x_precomputed_}
+                avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_}
 
             # Do an optimization step.
             if model_type == 'ae_base':
@@ -979,8 +1002,21 @@ def main():
                 shared_feed_dict.update({z: random_batch_z})
                 sess.run([d_optim, g_optim], shared_feed_dict)
 
-            elif model_type in ['mmd_gan_simple', 'kmmd_gan', 'cmd_gan']:
+            elif model_type in ['mmd_gan_simple', 'kmmd_gan']:
                 shared_feed_dict.update({z: random_batch_z})
+                sess.run(g_optim, shared_feed_dict)
+
+            elif model_type in ['cmd_gan']:
+                # Compute coefficients for progressive CMD.
+                # This fades in M2 over 5k iters, M3 over 10k iters, etc.
+                phase_in_interval = 5000.
+                coefs_ = np.ones(k_moments)
+                for k in range(1, k_moments):
+                    coefs_[k] = np.minimum(1., step / (k * phase_in_interval))
+
+                shared_feed_dict.update(
+                    {z: random_batch_z,
+                     prog_cmd_coefs: coefs_})
                 sess.run(g_optim, shared_feed_dict)
 
             # Occasionally update learning rate.
@@ -1033,13 +1069,17 @@ def main():
                                step, kmmd_, mmd_, loss1_, loss2_))
 
                 elif model_type == 'cmd_gan':
-                    cmd_, mmd_, loss1_, loss2_, summary_result = sess.run(
-                        [cmd, mmd, loss1, loss2, summary_op], shared_feed_dict)
+                    cmd_, cmd_k_terms_, mmd_, loss1_, loss2_, summary_result = \
+                        sess.run(
+                            [cmd, cmd_k_terms, mmd, loss1, loss2, summary_op],
+                            shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
                     print(('CMD_GAN. Iter: {}, cmd: {:.4f}, mmd: {:.4f} '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, cmd_, mmd_, loss1_, loss2_))
+                    print('  COEFS: {}'.format(coefs_))
+
 
                 # TODO: DIAGNOSE NaNs.
                 if np.isnan(mmd_):
@@ -1061,7 +1101,8 @@ def main():
                 (sensitivity, precision, false_positive_rate, tp, fn, fp,
                  tn) = evaluate_presence_risk(
                     data_unnormed, data_test_unnormed, g_full_unnormed,
-                    ball_radius=avg_dist_x_test_to_x_precomputed_)
+                    )
+                    #ball_radius=avg_dist_x_to_x_test_precomputed_)
                 sens_minus_fpr = sensitivity - false_positive_rate
                 print('  Sens={:.4f}, Prec={:.4f}, Fpr: {:.4f}, '
                       'tp: {}, fn: {}, fp: {}, tn: {}'.format(
