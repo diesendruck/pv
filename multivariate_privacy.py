@@ -46,7 +46,7 @@ parser.add_argument('--depth', type=int, default=10,
                     help='num of generator layers')
 parser.add_argument('--z_dim', type=int, default=10)
 parser.add_argument('--log_step', type=int, default=1000)
-parser.add_argument('--max_step', type=int, default=150000)
+parser.add_argument('--max_step', type=int, default=100000)
 parser.add_argument('--learning_rate', type=float, default=1e-3)
 parser.add_argument('--lr_update_step', type=int, default=200000)
 parser.add_argument('--optimizer', type=str, default='rmsprop',
@@ -165,6 +165,13 @@ def load_checkpoint(saver, sess, checkpoint_dir):
         return False, 0
 
 
+def compute_moments(arr, k_moments=2):
+    m = []
+    for i in range(1, k_moments+1):
+        m.append(np.round(np.mean(arr**i), 4))
+    return m
+
+
 def load_data(data_num, percent_train):
     """Generates data, and returns it normalized, along with helper objects.
     """
@@ -229,13 +236,6 @@ def load_data(data_num, percent_train):
 
 def unnormalize(data_normed, data_raw_mean, data_raw_std):
     return data_normed * data_raw_std + data_raw_mean
-
-
-def compute_moments(arr, k_moments=2):
-    m = []
-    for i in range(1, k_moments+1):
-        m.append(np.round(np.mean(arr**i), 4))
-    return m
 
 
 def prepare_dirs(load_existing):
@@ -875,6 +875,23 @@ def main():
     normed_moments_data_test = compute_moments(data_test, k_moments=k_moments+1)
     nmd_zero_indices = np.argwhere(np.array(normed_moments_data) < 0.1) 
 
+    # Compute baseline statistics on moments for data set.
+    num_samples = 100
+    baseline_moments = np.zeros((num_samples, k_moments))
+    for i in range(num_samples):
+        d, _, d_num, _, _, d_raw_mean, d_raw_std = load_data(data_num,
+            percent_train)
+        d = d * d_raw_std + d_raw_mean
+        baseline_moments[i] = compute_moments(d, k_moments)
+    baseline_moments_means = np.mean(baseline_moments, axis=0)
+    baseline_moments_stds = np.std(baseline_moments, axis=0)
+    baseline_moments_maes = np.mean(np.abs(
+        baseline_moments - baseline_moments_means), axis=0)
+    for j in range(k_moments):
+        print('Moment {} Mean: {:.2f}, Std: {:.2f}, MAE: {:.2f}'.format(j+1,
+            baseline_moments_means[j], baseline_moments_stds[j],
+            baseline_moments_maes[j]))
+
     # Get compact interval bounds for CMD computations.
     cmd_a = np.min(data)
     cmd_b = np.max(data)
@@ -976,12 +993,11 @@ def main():
 
         # Containers to hold empirical and relative errors of moments.
         empirical_moments_gens = np.zeros(
-            ((max_step - load_step) / log_step, k_moments+1))
-        do_relative = 1
-        if do_relative:
-            relative_error_of_moments = np.zeros(
-                ((max_step - load_step) / log_step, k_moments+1))
-            reom = relative_error_of_moments
+            ((max_step - 0) / log_step, k_moments+1))
+        relative_error_of_moments = np.zeros(
+            ((max_step - 0) / log_step, k_moments+1))
+        reom = relative_error_of_moments
+
 
 
         #######################################################################
@@ -1224,69 +1240,57 @@ def main():
                         plot_dir, 'empirical_moments.png'))
                     plt.close(fig)
 
-                    if do_relative:
-                        print('  data_normed moments: {}'.format(
-                            normed_moments_data))
-                        relative_error_of_moments_test = np.round(
-                            (np.array(normed_moments_data_test) -
-                             np.array(normed_moments_data)) /
-                             np.array(normed_moments_data), 2)
-                        relative_error_of_moments_gens = np.round(
-                            (np.array(normed_moments_gens) -
-                             np.array(normed_moments_data)) /
-                             np.array(normed_moments_data), 2)
+                    # Plot relative error of moments.
+                    print('  data_normed moments: {}'.format(
+                        normed_moments_data))
+                    relative_error_of_moments_test = np.round(
+                        (np.array(normed_moments_data_test) -
+                         np.array(normed_moments_data)) /
+                         np.array(normed_moments_data), 2)
+                    relative_error_of_moments_gens = np.round(
+                        (np.array(normed_moments_gens) -
+                         np.array(normed_moments_data)) /
+                         np.array(normed_moments_data), 2)
 
-                        relative_error_of_moments_test[nmd_zero_indices] = 0.0
-                        relative_error_of_moments_gens[nmd_zero_indices] = 0.0
-                        reom[step / log_step] = relative_error_of_moments_gens
+                    relative_error_of_moments_test[nmd_zero_indices] = 0.0
+                    relative_error_of_moments_gens[nmd_zero_indices] = 0.0
+                    reom[step / log_step] = relative_error_of_moments_gens
 
-                        print('    RELATIVE_TEST: {}'.format(list(
-                            relative_error_of_moments_test)))
-                        print('    RELATIVE_GENS: {}'.format(list(
-                            relative_error_of_moments_gens)))
+                    print('    RELATIVE_TEST: {}'.format(list(
+                        relative_error_of_moments_test)))
+                    print('    RELATIVE_GENS: {}'.format(list(
+                        relative_error_of_moments_gens)))
 
-                        # For plotting, zero-out moments that are likely zero, so
-                        # their relative values don't dominate the plot.
-                        """
-                        zero_indices = np.argwhere(np.array(
-                            normed_moments_data) < 0.1) 
-                        relative_error_of_moments_test[zero_indices] = 0.0
-                        relative_error_of_moments_gens[zero_indices] = 0.0
-                        fig, ax = plt.subplots()
-                        ax.plot(relative_error_of_moments_test, label='test')
-                        ax.plot(relative_error_of_moments_gens, label='gens')
-                        ax.legend()
-                        plt.savefig(os.path.join(
-                            plot_dir, 'relatives_{}.png'.format(step)))
-                        plt.close(fig)
-                        """
-                        reom_trim_level = np.max(np.abs(reom[:, :k_moments]))
-                        reom_trimmed = np.copy(reom)
-                        reom_trimmed[
-                            np.where(reom_trimmed > reom_trim_level)] = \
-                                2 * reom_trim_level
-                        reom_trimmed[
-                            np.where(reom_trimmed < -reom_trim_level)] = \
-                                -2 * reom_trim_level
-                        fig, ax = plt.subplots()
-                        for i in range(k_moments+1):
-                            ax.plot(reom[:step/log_step, i],
-                                    label='m{}'.format(i+1), c=cmap(i))
-                        ax.set_ylim((-2 * reom_trim_level, 2 * reom_trim_level))
-                        ax.legend()
-                        plt.suptitle('{}, relative errors of moments, k={}'.format(
-                            tag, k_moments))
-                        plt.savefig(os.path.join(
-                            plot_dir, 'reom.png'))
-                        plt.close(fig)
+                    # For plotting, zero-out moments that are likely zero, so
+                    # their relative values don't dominate the plot.
+                    reom_trim_level = np.max(np.abs(reom[:, :k_moments]))
+                    reom_trimmed = np.copy(reom)
+                    reom_trimmed[
+                        np.where(reom_trimmed > reom_trim_level)] = \
+                            2 * reom_trim_level
+                    reom_trimmed[
+                        np.where(reom_trimmed < -reom_trim_level)] = \
+                            -2 * reom_trim_level
+                    fig, ax = plt.subplots()
+                    for i in range(k_moments+1):
+                        ax.plot(reom[:step/log_step, i],
+                                label='m{}'.format(i+1), c=cmap(i))
+                    #ax.set_ylim((-2 * reom_trim_level, 2 * reom_trim_level))
+                    ax.set_ylim((-2, 2))
+                    ax.legend()
+                    plt.suptitle('{}, relative errors of moments, k={}'.format(
+                        tag, k_moments))
+                    plt.savefig(os.path.join(
+                        plot_dir, 'reom.png'))
+                    plt.close(fig)
 
-                    else:
-                        print('  data_normed moments: {}'.format(
-                            normed_moments_data))
-                        print('  test_normed moments: {}'.format(
-                            normed_moments_data_test))
-                        print('  gens_normed moments: {}'.format(
-                            normed_moments_gens))
+                    # Print normed moments to console.
+                    print('  data_normed moments: {}'.format(
+                        normed_moments_data))
+                    print('  test_normed moments: {}'.format(
+                        normed_moments_data_test))
+                    print('  gens_normed moments: {}'.format(
+                        normed_moments_gens))
 
 
 if __name__ == "__main__":

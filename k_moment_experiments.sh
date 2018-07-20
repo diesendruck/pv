@@ -142,10 +142,31 @@ if [ "$1" == "tb" ]; then
     cp -r logs/logs_cmd_k_minus_k_plus_1/summary logs/logs_all/cmd_k_minus_k_plus_1; \
     cp -r logs/logs_cmd_k_minus_mmd/summary logs/logs_all/cmd_k_minus_mmd; \
     cp -r logs/logs_prog_cmd/summary logs/logs_all/prog_cmd; \
-    cp -r logs/logs_k3_switch/summary logs/logs_all/k3_switch; \
-    cp -r logs/logs_k5_switch/summary logs/logs_all/k5_switch; \
-    cp -r logs/logs_k3_base/summary logs/logs_all/k3_base; \
-    cp -r logs/logs_k5_base/summary logs/logs_all/k5_base; \
+    #cp -r logs/logs_k3_switch/summary logs/logs_all/k3_switch; \
+    #cp -r logs/logs_k5_switch/summary logs/logs_all/k5_switch; \
+    #cp -r logs/logs_k3_base/summary logs/logs_all/k3_base; \
+    #cp -r logs/logs_k5_base/summary logs/logs_all/k5_base; \
+    #cp -r logs/logs_cmd5/summary logs/logs_all/cmd5; \
+    cp -r logs/logs_cmd3/summary logs/logs_all/cmd3; \
+    cp -r logs/logs_cmd3_v2/summary logs/logs_all/cmd3_v2; \
+    cp -r logs/logs_mmd_cmd3_1/summary logs/logs_all/mmd_cmd3_1; \
+    cp -r logs/logs_mmd_cmd3_2/summary logs/logs_all/mmd_cmd3_2; \
+    cp -r logs/logs_mmd_cmd3_3/summary logs/logs_all/mmd_cmd3_3; \
+    cp -r logs/logs_mmd_cmd3_4/summary logs/logs_all/mmd_cmd3_4; \
+    #
+    cp -r logs/logs_cmd5/summary logs/logs_all/cmd5; \
+    cp -r logs/logs_cmd5_v2/summary logs/logs_all/cmd5_v2; \
+    cp -r logs/logs_mmd_cmd5_1/summary logs/logs_all/mmd_cmd5_1; \
+    cp -r logs/logs_mmd_cmd5_2/summary logs/logs_all/mmd_cmd5_2; \
+    cp -r logs/logs_mmd_cmd5_3/summary logs/logs_all/mmd_cmd5_3; \
+    cp -r logs/logs_mmd_cmd5_4/summary logs/logs_all/mmd_cmd5_4; \
+    #
+    cp -r logs/logs_cmd7/summary logs/logs_all/cmd7; \
+    cp -r logs/logs_cmd7_v2/summary logs/logs_all/cmd7_v2; \
+    cp -r logs/logs_mmd_cmd7_1/summary logs/logs_all/mmd_cmd7_1; \
+    cp -r logs/logs_mmd_cmd7_2/summary logs/logs_all/mmd_cmd7_2; \
+    cp -r logs/logs_mmd_cmd7_3/summary logs/logs_all/mmd_cmd7_3; \
+    cp -r logs/logs_mmd_cmd7_4/summary logs/logs_all/mmd_cmd7_4; \
     # AE base.
     cp -r logs/logs_ae_partition_ae_data/summary logs/logs_all/ae_partition_ae_data; \
     cp -r logs/logs_ae_partition_enc_enc/summary logs/logs_all/ae_partition_enc_enc; \
