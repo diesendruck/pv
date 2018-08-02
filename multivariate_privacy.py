@@ -13,8 +13,13 @@ import sys
 sys.path.append('/home/maurice/mmd')
 import tensorflow as tf
 layers = tf.layers
-from mmd_utils import compute_mmd, compute_kmmd, compute_cmd
+
+from tensorflow import keras
+from mmd_utils import compute_mmd, compute_kmmd, compute_cmd, compute_moments
 from scipy.stats import multivariate_normal, shapiro
+from tensorflow.python.framework import ops
+from tensorflow.python.ops import math_ops
+
 
 
 """ This script runs several privacy-oriented MMD-GAN, CMD, and MMD+AE style
@@ -31,10 +36,11 @@ parser.add_argument('--mmd_variation', type=str, default=None,
                      choices=['mmd_to_cmd'])
 parser.add_argument('--cmd_variation', type=str, default=None,
                      choices=['minus_k_plus_1', 'minus_mmd',
-                              'prog_cmd', 'mmd_to_cmd'])
+                              'prog_cmd', 'mmd_to_cmd', 'fractional'])
 parser.add_argument('--ae_variation', type=str, default=None,
-                     choices=['pure', 'partition_ae_data', 'partition_enc_enc',
-                              'subset', 'cmd_k', 'mmd', 'cmd_k_minus_k_plus_1'])
+                     choices=['pure', 'laplace', 'partition_ae_data',
+                              'partition_enc_enc', 'subset', 'cmd_k', 'mmd',
+                              'cmd_k_minus_k_plus_1'])
 parser.add_argument('--data_num', type=int, default=10000)
 parser.add_argument('--data_dimension', type=int, default=1)
 parser.add_argument('--percent_train', type=float, default=0.9)
@@ -48,7 +54,7 @@ parser.add_argument('--z_dim', type=int, default=10)
 parser.add_argument('--log_step', type=int, default=1000)
 parser.add_argument('--max_step', type=int, default=100000)
 parser.add_argument('--learning_rate', type=float, default=1e-3)
-parser.add_argument('--lr_update_step', type=int, default=200000)
+parser.add_argument('--lr_update_step', type=int, default=500000)
 parser.add_argument('--optimizer', type=str, default='rmsprop',
                     choices=['adagrad', 'adam', 'gradientdescent', 'rmsprop'])
 parser.add_argument('--data_file', type=str, default='gp_data.txt')
@@ -95,19 +101,21 @@ def get_random_z(gen_num, z_dim):
     return np.random.normal(size=[gen_num, z_dim])
 
 
-def dense(x, width, activation, batch_residual=False):
+def dense(x, width, activation, batch_residual=False, name=None):
     if not batch_residual:
-        x_ = layers.dense(x, width, activation=activation)
-        return layers.batch_normalization(x_)
+        x_ = layers.dense(x, width, activation=activation, name=name)
+        r = layers.batch_normalization(x_)
+        return r
     else:
         # TODO: Should this use bias?
         x_ = layers.dense(x, width, activation=activation, use_bias=True)
-        return layers.batch_normalization(x_) + x
+        r = layers.batch_normalization(x_) + x
+        return r
 
 
 def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
         reuse=False):
-    """Decodes. Generates output, given noise input."""
+    """Autoencodes input via a bottleneck layer h."""
     out_dim = x.shape[1]
     with tf.variable_scope('encoder', reuse=reuse) as vs_enc:
         x = dense(x, width, activation=activation)
@@ -119,6 +127,36 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
         h = dense(x, z_dim, activation=None)
 
     with tf.variable_scope('decoder', reuse=reuse) as vs_dec:
+        x = dense(h, width, activation=activation)
+
+        for idx in range(depth - 1):
+            # TODO: Should this use batch resid, and is it defined properly?
+            x = dense(x, width, activation=activation, batch_residual=True)
+
+        ae = dense(x, out_dim, activation=None)
+
+    vars_enc = tf.contrib.framework.get_variables(vs_enc)
+    vars_dec = tf.contrib.framework.get_variables(vs_dec)
+    return h, ae, vars_enc, vars_dec
+
+
+def autoencoder_normed_enc(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
+        reuse=False):
+    """Autoencodes input via bottleneck layer h, with unit-normed weights."""
+    out_dim = x.shape[1]
+    with tf.variable_scope('encoder_ne', reuse=reuse) as vs_enc:
+        x = dense(x, width, activation=activation)
+
+        for idx in range(depth - 1):
+            # TODO: Should this use batch resid, and is it defined properly?
+            x = dense(x, width, activation=activation, batch_residual=True)
+
+        # This dense layer has weights that unit-normed.
+        h = layers.dense(x, z_dim, activation=None, use_bias=False, name='hidden',
+            kernel_constraint=keras.constraints.unit_norm(axis=None))
+        #h = dense(x, z_dim, activation=None)
+
+    with tf.variable_scope('decoder_ne', reuse=reuse) as vs_dec:
         x = dense(h, width, activation=activation)
 
         for idx in range(depth - 1):
@@ -163,13 +201,6 @@ def load_checkpoint(saver, sess, checkpoint_dir):
     else:
         print(" [*] Failed to find a checkpoint")
         return False, 0
-
-
-def compute_moments(arr, k_moments=2):
-    m = []
-    for i in range(1, k_moments+1):
-        m.append(np.round(np.mean(arr**i), 4))
-    return m
 
 
 def load_data(data_num, percent_train):
@@ -385,10 +416,31 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     g = ae_x
     g_full = ae_x_full
 
-    # Build in differential privacy terms.
-    # 1. Compute MMD between original input and random subset of input.
-    # 2. Add this altered MMD to the original for all those MMDs.
-    # 3. Include loss on closeness/min distance from ae(x) to x.
+    # Compare distances between data, heldouts, and gen.
+    avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
+    avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
+    avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
+    loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g 
+    loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
+
+    # Define MMD and CMD for reporting.
+    mmd = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
+    cmd = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True, cmd_a=cmd_a,
+        cmd_b=cmd_b)
+
+    # Set up optimizer, and learning rate.
+    lr = tf.Variable(learning_rate, name='lr', trainable=False)
+    lr_update = tf.assign(lr, tf.maximum(lr * 0.8, 1e-8), name='lr_update')
+    if optimizer == 'adagrad':
+        d_opt = tf.train.AdagradOptimizer(lr)
+    elif optimizer == 'adam':
+        d_opt = tf.train.AdamOptimizer(lr)
+    elif optimizer == 'rmsprop':
+        d_opt = tf.train.RMSPropOptimizer(lr)
+    else:
+        d_opt = tf.train.GradientDescentOptimizer(lr)
+
+    # Define privacy mechanism, and ultimately the "d_loss".
     if ae_variation == 'pure':
         ae_base_loss = ae_loss
         d_loss = ae_loss 
@@ -439,43 +491,59 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
             use_tf=True, cmd_a=cmd_a, cmd_b=cmd_b)
         ae_base_loss = 2 * cmd_k - cmd_k_minus_k_plus_1
         d_loss = ae_loss + 2. * ae_base_loss
+    elif ae_variation == 'laplace':
+        enc_x, ae_x, enc_vars, dec_vars = autoencoder_normed_enc(x,
+            width=width, depth=depth, activation=activation, z_dim=z_dim,
+            reuse=False)
+        enc_x_full, ae_x_full, _, _ = autoencoder_normed_enc(x_full,
+            width=width, depth=depth, activation=activation, z_dim=z_dim,
+            reuse=True)
+        ae_loss = tf.reduce_mean(tf.square(ae_x - x))
+        g = ae_x
+        g_full = ae_x_full
 
-    # Compare distances between data, heldouts, and gen.
-    avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
-    avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
-    avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
-    loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g 
-    loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
+        # Compare distances between data, heldouts, and gen.
+        avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
+        avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
+        avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
+        loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g 
+        loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
 
-    # Define MMD and CMD for reporting.
-    mmd = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
-    cmd = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True, cmd_a=cmd_a,
-        cmd_b=cmd_b)
+        # Define MMD and CMD for reporting.
+        mmd = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
+        cmd = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True, cmd_a=cmd_a,
+            cmd_b=cmd_b)
 
-    lr = tf.Variable(learning_rate, name='lr', trainable=False)
-    lr_update = tf.assign(lr, tf.maximum(lr * 0.8, 1e-8), name='lr_update')
-    if optimizer == 'adagrad':
-        d_opt = tf.train.AdagradOptimizer(lr)
-    elif optimizer == 'adam':
-        d_opt = tf.train.AdamOptimizer(lr)
-    elif optimizer == 'rmsprop':
-        d_opt = tf.train.RMSPropOptimizer(lr)
-    else:
-        d_opt = tf.train.GradientDescentOptimizer(lr)
+        # TODO: Before optimization, add noise to weights.
+        eps = 1.0
+        delta = 1e-5
+        h_weights = [v for v in tf.trainable_variables() if 'hidden' in v.name][0]
+        num_weights = np.prod(h_weights.shape.as_list())
+        gaussian_noise = np.random.normal(size=h_weights.shape.as_list(), loc=0,
+            scale=np.sqrt(8 * num_weights * np.log(1.25 / delta) / (eps**2)))
+        laplace_noise = np.random.laplace(size=h_weights.shape.as_list(), loc=0,
+            scale=np.sqrt(2 * num_weights / (eps**2)))
+        h_weights_update = tf.assign_add(h_weights, gaussian_noise)
 
-    # Define optim nodes.
-    # Clip encoder gradients.
-    clip = 1
-    if clip:
-        enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
-        dec_grads_, dec_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=dec_vars))
-        enc_grads_clipped_ = tuple(
-            [tf.clip_by_value(grad, -0.01, 0.01) for grad in enc_grads_])
-        d_grads_ = enc_grads_clipped_ + dec_grads_
-        d_vars_ = enc_vars_ + dec_vars_
-        d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
-    else:
+        # Define loss and optim node.
+        ae_base_loss = ae_loss
+        d_loss = ae_loss
         d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
+
+
+    # Define optim nodes, optionally clipping encoder gradients.
+    if ae_variation != 'laplace':
+        clip = 1
+        if clip:
+            enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
+            dec_grads_, dec_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=dec_vars))
+            enc_grads_clipped_ = tuple(
+                [tf.clip_by_value(grad, -0.01, 0.01) for grad in enc_grads_])
+            d_grads_ = enc_grads_clipped_ + dec_grads_
+            d_vars_ = enc_vars_ + dec_vars_
+            d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
+        else:
+            d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
 
     # Define summary op for reporting.
     summary_op = tf.summary.merge([
@@ -492,7 +560,8 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     return (x, x_full, x_test, x_precompute, x_test_precompute,
             avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd, cmd,
-            loss1, loss2, lr_update, d_optim, summary_op)
+            loss1, loss2, lr_update, d_optim, summary_op, h_weights,
+            h_weights_update)
 
 
 def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
@@ -805,6 +874,10 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         # Train with MMD, and switch to CMD at inidcator step.
         cmd_adjusted = (1 - mmd_to_cmd_indicator) * mmd + \
             (mmd_to_cmd_indicator) * cmd_k
+    elif cmd_variation == 'fractional':
+        # CMD with finer grid of moments up to k.
+        cmd_adjusted = compute_cmd(x, g, k_moments=k_moments, use_tf=True,
+            cmd_a=cmd_a, cmd_b=cmd_b, fractional_step=0.5)  
     else:
         cmd_adjusted = cmd_k  # Normal CMD loss.
 
@@ -883,10 +956,10 @@ def main():
             percent_train)
         d = d * d_raw_std + d_raw_mean
         baseline_moments[i] = compute_moments(d, k_moments)
-    baseline_moments_means = np.mean(baseline_moments, axis=0)
-    baseline_moments_stds = np.std(baseline_moments, axis=0)
+    baseline_moments_means = np.mean(baseline_moments, axis=0)  # Mean.
+    baseline_moments_stds = np.std(baseline_moments, axis=0)  # Standard deviation.
     baseline_moments_maes = np.mean(np.abs(
-        baseline_moments - baseline_moments_means), axis=0)
+        baseline_moments - baseline_moments_means), axis=0)  # Mean absolute error.
     for j in range(k_moments):
         print('Moment {} Mean: {:.2f}, Std: {:.2f}, MAE: {:.2f}'.format(j+1,
             baseline_moments_means[j], baseline_moments_stds[j],
@@ -921,7 +994,8 @@ def main():
         (x, x_full, x_test, x_precompute, x_test_precompute,
          avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd, cmd,
-         loss1, loss2, lr_update, d_optim, summary_op) = \
+         loss1, loss2, lr_update, d_optim, summary_op, h_weights,
+         h_weights_update) = \
              build_model_ae_base(
                  batch_size, data_num, data_test_num, gen_num, out_dim, z_dim,
                  cmd_a, cmd_b)
@@ -1018,7 +1092,10 @@ def main():
 
             # Do an optimization step.
             if model_type == 'ae_base':
-                sess.run(d_optim, shared_feed_dict)
+                if ae_variation == 'laplace':
+                    sess.run([h_weights_update, d_optim], shared_feed_dict)
+                else:
+                    sess.run(d_optim, shared_feed_dict)
 
             elif model_type == 'mmd_gan':
                 # Define schedule of switching from MMD to CMD.
@@ -1088,6 +1165,8 @@ def main():
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, ae_loss_, ae_base_loss_, d_loss_, mmd_,
                                loss1_, loss2_))
+                    h_weights_ = sess.run(h_weights, shared_feed_dict)
+                    print('NORM: {}'.format(np.sum(np.square(h_weights_))))
 
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
@@ -1126,8 +1205,6 @@ def main():
                     print(('CMD_GAN. Iter: {}, cmd: {:.4f}, mmd: {:.4f} '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, cmd_, mmd_, loss1_, loss2_))
-                    #print('  COEFS: {}'.format(coefs_))
-
 
                 # TODO: DIAGNOSE NaNs.
                 if np.isnan(mmd_):
