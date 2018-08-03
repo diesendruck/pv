@@ -15,7 +15,7 @@ import tensorflow as tf
 layers = tf.layers
 
 from tensorflow import keras
-from mmd_utils import compute_mmd, compute_kmmd, compute_cmd, compute_moments
+from mmd_utils import compute_mmd, compute_kmmd, compute_cmd, compute_moments, MMD_vs_Normal_by_filter
 from scipy.stats import multivariate_normal, shapiro
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import math_ops
@@ -114,7 +114,7 @@ def dense(x, width, activation, batch_residual=False, name=None):
 
 
 def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
-        reuse=False):
+        reuse=False, normed_weights=False):
     """Autoencodes input via a bottleneck layer h."""
     out_dim = x.shape[1]
     with tf.variable_scope('encoder', reuse=reuse) as vs_enc:
@@ -124,40 +124,29 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
             # TODO: Should this use batch resid, and is it defined properly?
             x = dense(x, width, activation=activation, batch_residual=True)
 
+        # TODO: Figure out whether weights should be normed.
+        # For the Laplace noise, use normed_weights and no bias. For all others,
+        #   use standard dense layer.
+        #if normed_weights:
+        #    h = layers.dense(x, z_dim, activation=None, use_bias=False,
+        #        name='hidden_nw',
+        #        )
+        #        #kernel_constraint=keras.constraints.unit_norm(axis=None))
+        #        #kernel_constraint=keras.constraints.max_norm(1, axis=None))
+        #else:
+        #    h = dense(x, z_dim, activation=None, name='hidden')
         h = dense(x, z_dim, activation=None)
 
     with tf.variable_scope('decoder', reuse=reuse) as vs_dec:
-        x = dense(h, width, activation=activation)
 
-        for idx in range(depth - 1):
-            # TODO: Should this use batch resid, and is it defined properly?
-            x = dense(x, width, activation=activation, batch_residual=True)
-
-        ae = dense(x, out_dim, activation=None)
-
-    vars_enc = tf.contrib.framework.get_variables(vs_enc)
-    vars_dec = tf.contrib.framework.get_variables(vs_dec)
-    return h, ae, vars_enc, vars_dec
-
-
-def autoencoder_normed_enc(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
-        reuse=False):
-    """Autoencodes input via bottleneck layer h, with unit-normed weights."""
-    out_dim = x.shape[1]
-    with tf.variable_scope('encoder_ne', reuse=reuse) as vs_enc:
-        x = dense(x, width, activation=activation)
-
-        for idx in range(depth - 1):
-            # TODO: Should this use batch resid, and is it defined properly?
-            x = dense(x, width, activation=activation, batch_residual=True)
-
-        # This dense layer has weights that unit-normed.
-        h = layers.dense(x, z_dim, activation=None, use_bias=False, name='hidden',
-            kernel_constraint=keras.constraints.unit_norm(axis=None))
-        #h = dense(x, z_dim, activation=None)
-
-    with tf.variable_scope('decoder_ne', reuse=reuse) as vs_dec:
-        x = dense(h, width, activation=activation)
+        if normed_weights:
+            x = layers.dense(h, width, activation=activation, name='hidden_nw',
+                )
+                #kernel_constraint=keras.constraints.unit_norm(axis=None))
+                #kernel_constraint=keras.constraints.max_norm(1, axis=None))
+        else:
+            x = dense(h, width, activation=activation, name='hidden')
+        #x = dense(h, width, activation=activation)
 
         for idx in range(depth - 1):
             # TODO: Should this use batch resid, and is it defined properly?
@@ -405,16 +394,37 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         name='avg_dist_x_to_x_test')
 
     # Autoencoder.
-    enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
-        width=width, depth=depth, activation=activation, z_dim=z_dim,
-        reuse=False)
-    enc_x_full, ae_x_full, _, _ = autoencoder(x_full,
-        width=width, depth=depth, activation=activation, z_dim=z_dim,
-        reuse=True)
+    if ae_variation == 'laplace':
+        enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
+            width=width, depth=depth, activation=activation, z_dim=z_dim,
+            reuse=False, normed_weights=True)  # Variation uses normed_weights.
+        enc_x_full, ae_x_full, _, _ = autoencoder(x_full,
+            width=width, depth=depth, activation=activation, z_dim=z_dim,
+            reuse=True, normed_weights=True)
+    else:
+        enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
+            width=width, depth=depth, activation=activation, z_dim=z_dim,
+            reuse=False)
+        enc_x_full, ae_x_full, _, _ = autoencoder(x_full,
+            width=width, depth=depth, activation=activation, z_dim=z_dim,
+            reuse=True)
 
     ae_loss = tf.reduce_mean(tf.square(ae_x - x))
+    enc_norm_loss = MMD_vs_Normal_by_filter(enc_x, np.ones([batch_size, 1], dtype=np.float32))
     g = ae_x
     g_full = ae_x_full
+
+    # Do weight management. For non laplace settings, it goes unused.
+    eps = 5.0
+    delta = 1e-5
+    h_weights = [v for v in tf.trainable_variables() if 'hidden' in v.name][0]
+    num_weights = np.prod(h_weights.shape.as_list())
+    gaussian_noise = np.random.normal(size=h_weights.shape.as_list(), loc=0,
+        scale=np.sqrt(8 * num_weights * np.log(1.25 / delta) / (eps**2)))
+    laplace_noise = np.random.laplace(size=h_weights.shape.as_list(), loc=0,
+        #scale=np.sqrt(2 * num_weights / (eps**2)))
+        scale=2 * num_weights / eps)
+    h_weights_update = tf.assign_add(h_weights, laplace_noise)
 
     # Compare distances between data, heldouts, and gen.
     avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
@@ -445,7 +455,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         ae_base_loss = ae_loss
         d_loss = ae_loss 
     elif ae_variation == 'partition_ae_data':
-        # Shuffle encodings, then MMD between first half and second half.
+        # Shuffle, then MMD between autoencodings of first half, and raw data second half.
         permuted_indices = np.random.permutation(batch_size)
         p1_indices = permuted_indices[:batch_size/2]
         p2_indices = permuted_indices[batch_size/2:]
@@ -454,7 +464,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         ae_base_loss = compute_mmd(ae_x_p1, x_p2, use_tf=True, slim_output=True)
         d_loss = 1.5 * ae_loss + 10. * ae_base_loss
     elif ae_variation == 'partition_enc_enc':
-        # Shuffle encodings, then MMD between first half and second half.
+        # Shuffle encodings, then MMD between encodings of first and second half.
         permuted_indices = np.random.permutation(batch_size)
         p1_indices = permuted_indices[:batch_size/2]
         p2_indices = permuted_indices[batch_size/2:]
@@ -475,7 +485,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
             slim_output=True)
         d_loss = 0.1 * ae_loss + 10. * ae_base_loss
     elif ae_variation == 'mmd':
-        # MMD between batch and autoencodings of batch.
+        # MMD between autoencodings of batch, and batch.
         ae_base_loss = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
         d_loss = ae_loss + 2. * ae_base_loss
     elif ae_variation == 'cmd_k':
@@ -492,49 +502,17 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         ae_base_loss = 2 * cmd_k - cmd_k_minus_k_plus_1
         d_loss = ae_loss + 2. * ae_base_loss
     elif ae_variation == 'laplace':
-        enc_x, ae_x, enc_vars, dec_vars = autoencoder_normed_enc(x,
-            width=width, depth=depth, activation=activation, z_dim=z_dim,
-            reuse=False)
-        enc_x_full, ae_x_full, _, _ = autoencoder_normed_enc(x_full,
-            width=width, depth=depth, activation=activation, z_dim=z_dim,
-            reuse=True)
-        ae_loss = tf.reduce_mean(tf.square(ae_x - x))
-        g = ae_x
-        g_full = ae_x_full
-
-        # Compare distances between data, heldouts, and gen.
-        avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
-        avg_dist_x_to_g, distances_x_g = avg_nearest_neighbor_distance(x, g)
-        avg_dist_x_test_to_g, distances_xt_g = avg_nearest_neighbor_distance(x_test, g)
-        loss1 = avg_dist_x_to_x_test - avg_dist_x_to_g 
-        loss2 = avg_dist_x_test_to_g - avg_dist_x_to_g
-
-        # Define MMD and CMD for reporting.
-        mmd = compute_mmd(ae_x, x, use_tf=True, slim_output=True)
-        cmd = compute_cmd(ae_x, x, k_moments=k_moments, use_tf=True, cmd_a=cmd_a,
-            cmd_b=cmd_b)
-
-        # TODO: Before optimization, add noise to weights.
-        eps = 1.0
-        delta = 1e-5
-        h_weights = [v for v in tf.trainable_variables() if 'hidden' in v.name][0]
-        num_weights = np.prod(h_weights.shape.as_list())
-        gaussian_noise = np.random.normal(size=h_weights.shape.as_list(), loc=0,
-            scale=np.sqrt(8 * num_weights * np.log(1.25 / delta) / (eps**2)))
-        laplace_noise = np.random.laplace(size=h_weights.shape.as_list(), loc=0,
-            scale=np.sqrt(2 * num_weights / (eps**2)))
-        h_weights_update = tf.assign_add(h_weights, gaussian_noise)
-
-        # Define loss and optim node.
+        # Define loss that encourages encodings near standard Gaussian.
         ae_base_loss = ae_loss
-        d_loss = ae_loss
+        d_loss = ae_loss + 0. * enc_norm_loss
         d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
 
 
     # Define optim nodes, optionally clipping encoder gradients.
-    if ae_variation != 'laplace':
-        clip = 1
-        if clip:
+    clip = 1
+    if clip:
+        if ae_variation != 'laplace':
+            # Clip all weights.
             enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
             dec_grads_, dec_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=dec_vars))
             enc_grads_clipped_ = tuple(
@@ -542,13 +520,32 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
             d_grads_ = enc_grads_clipped_ + dec_grads_
             d_vars_ = enc_vars_ + dec_vars_
             d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
-        else:
-            d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
+        elif ae_variation == 'laplace':
+            # Just encoder, grads and vars.
+            enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
+
+            # Decoder grads and vars, split into hidden and non-hidden.
+            hidden_vars = [v for v in tf.trainable_variables() if 'hidden' in v.name]
+            not_hidden_vars = [v for v in dec_vars if v not in hidden_vars]
+            hv_grads_, hv_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=hidden_vars))
+            nhv_grads_, nhv_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=not_hidden_vars))
+
+            # Clip only weights of hidden layer, to [-1, 1].
+            hv_grads_clipped_ = tuple(
+                [tf.clip_by_value(grad, -1., 1.) for grad in hv_grads_])
+
+            # Collect grads, collect vars, in the correct order, and apply them.
+            d_grads_ = enc_grads_ + hv_grads_clipped_ + nhv_grads_
+            d_vars_ = enc_vars_ + hv_vars_ + nhv_vars_
+            d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
+    else:
+        d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
 
     # Define summary op for reporting.
     summary_op = tf.summary.merge([
 	tf.summary.scalar("loss/ae_loss", ae_loss),
 	tf.summary.scalar("loss/ae_base_loss", ae_base_loss),
+	tf.summary.scalar("loss/enc_norm_loss", enc_norm_loss),
 	tf.summary.scalar("loss/d_loss", d_loss),
 	tf.summary.scalar("loss/mmd", mmd),
 	tf.summary.scalar("loss/cmd", cmd),
@@ -557,11 +554,11 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
 	tf.summary.scalar("misc/lr", lr),
     ])
 
-    return (x, x_full, x_test, x_precompute, x_test_precompute,
+    return (x, x_full, enc_x_full, x_test, x_precompute, x_test_precompute,
             avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
-            distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd, cmd,
-            loss1, loss2, lr_update, d_optim, summary_op, h_weights,
-            h_weights_update)
+            distances_xt_xp, g, g_full, ae_loss, ae_base_loss,
+            enc_norm_loss, d_loss, mmd, cmd, loss1, loss2, lr_update,
+            d_optim, summary_op, h_weights, h_weights_update)
 
 
 def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
@@ -577,6 +574,7 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
     # Regular training placeholders.
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
+    x_full = tf.placeholder(tf.float32, [data_num, out_dim], name='x_full')
     z = tf.placeholder(tf.float32, [gen_num, z_dim], name='z')
     z_full = tf.placeholder(tf.float32, [data_num, z_dim], name='z_full')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
@@ -585,21 +583,29 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     mmd_to_cmd_indicator = tf.placeholder(tf.float32, shape=(),
         name='mmd_to_cmd_indicator')
 
+    # Create simulation and set up and autoencoder inputs.
     g, g_vars = generator(
         z, width=width, depth=depth, activation=activation, out_dim=out_dim)
     g_full, _ = generator(
         z_full, width=width, depth=depth, activation=activation, out_dim=out_dim,
         reuse=True)
     ae_in = tf.concat([x, g], 0)
+
+    # Compute with autoencoder.
+    # Autoencoding of data and generated batches.
     h_out, ae_out, enc_vars, dec_vars = autoencoder(ae_in,
         width=width, depth=depth, activation=activation, z_dim=z_dim,
         reuse=False)
     enc_x, enc_g = tf.split(h_out, [batch_size, gen_num])
     ae_x, ae_g = tf.split(ae_out, [batch_size, gen_num])
 
+    # Autoencoding of full data set.
+    enc_x_full, ae_x_full, _, _ = autoencoder(x_full,
+        width=width, depth=depth, activation=activation, z_dim=z_dim,
+        reuse=True)
+
     # Compute autoencoder loss on both data and generations.
     ae_loss = tf.reduce_mean(tf.square(ae_out - ae_in))
-
     # Compute MMD between encodings of data and encodings of generated.
     mmd_on_encodings = compute_mmd(enc_x, enc_g, use_tf=True, slim_output=True)
 
@@ -645,14 +651,17 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
     # Define optim nodes.
     # Clip encoder gradients.
-    #d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
-    enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
-    dec_grads_, dec_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=dec_vars))
-    enc_grads_clipped_ = tuple(
-        [tf.clip_by_value(grad, -0.01, 0.01) for grad in enc_grads_])
-    d_grads_ = enc_grads_clipped_ + dec_grads_
-    d_vars_ = enc_vars_ + dec_vars_
-    d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
+    clip = 0
+    if clip:
+        enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
+        dec_grads_, dec_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=dec_vars))
+        enc_grads_clipped_ = tuple(
+            [tf.clip_by_value(grad, -0.01, 0.01) for grad in enc_grads_])
+        d_grads_ = enc_grads_clipped_ + dec_grads_
+        d_vars_ = enc_vars_ + dec_vars_
+        d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
+    else:
+        d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
     g_optim = g_opt.minimize(g_loss, var_list=g_vars)
 
     # Define summary op for reporting.
@@ -667,10 +676,11 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 	tf.summary.scalar("misc/lr", lr),
     ])
 
-    return (x, z, z_full, x_test, x_precompute, x_test_precompute,
-            avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
-            distances_xt_xp, mmd_to_cmd_indicator, g, g_full, ae_loss, d_loss,
-            mmd, cmd, loss1, loss2, lr_update, d_optim, g_optim, summary_op)
+    return (x, x_full, enc_x_full, z, z_full, x_test, x_precompute,
+            x_test_precompute, avg_dist_x_to_x_test,
+            avg_dist_x_to_x_test_precomputed, distances_xt_xp,
+            mmd_to_cmd_indicator, g, g_full, ae_loss, d_loss, mmd, cmd, loss1,
+            loss2, lr_update, d_optim, g_optim, summary_op)
 
 
 def build_model_mmd_gan_simple(batch_size, gen_num, data_num, data_test_num,
@@ -988,23 +998,25 @@ def main():
     if os.path.isfile(g_out_file):
         os.remove(g_out_file)
 
+    # build_all()
     # Build model.
     if model_type == 'ae_base':
         # Define compact space for CMD.
-        (x, x_full, x_test, x_precompute, x_test_precompute,
+        (x, x_full, enc_x_full, x_test, x_precompute, x_test_precompute,
          avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
-         distances_xt_xp, g, g_full, ae_loss, ae_base_loss, d_loss, mmd, cmd,
-         loss1, loss2, lr_update, d_optim, summary_op, h_weights,
-         h_weights_update) = \
+         distances_xt_xp, g, g_full, ae_loss, ae_base_loss,
+         enc_norm_loss, d_loss, mmd, cmd, loss1, loss2, lr_update,
+         d_optim, summary_op, h_weights, h_weights_update) = \
              build_model_ae_base(
                  batch_size, data_num, data_test_num, gen_num, out_dim, z_dim,
                  cmd_a, cmd_b)
 
     elif model_type == 'mmd_gan':
-        (x, z, z_full, x_test, x_precompute, x_test_precompute,
-         avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
-         distances_xt_xp, mmd_to_cmd_indicator, g, g_full, ae_loss, d_loss, mmd,
-         cmd, loss1, loss2, lr_update, d_optim, g_optim, summary_op) = \
+        (x, x_full, enc_x_full, z, z_full, x_test, x_precompute,
+         x_test_precompute, avg_dist_x_to_x_test,
+         avg_dist_x_to_x_test_precomputed, distances_xt_xp,
+         mmd_to_cmd_indicator, g, g_full, ae_loss, d_loss, mmd, cmd, loss1,
+         loss2, lr_update, d_optim, g_optim, summary_op) = \
              build_model_mmd_gan(
                  batch_size, gen_num, data_num, data_test_num, out_dim, z_dim,
                  cmd_a, cmd_b)
@@ -1093,21 +1105,23 @@ def main():
             # Do an optimization step.
             if model_type == 'ae_base':
                 if ae_variation == 'laplace':
+                    # Added in noise.
                     sess.run([h_weights_update, d_optim], shared_feed_dict)
                 else:
                     sess.run(d_optim, shared_feed_dict)
 
             elif model_type == 'mmd_gan':
                 # Define schedule of switching from MMD to CMD.
-                if step < 50000:
-                    indicator_ = 0.0
+                if mmd_variation == 'mmd_to_cmd':
+                    if step < 50000:
+                        indicator_ = 0.
+                    else:
+                        indicator_ = 1.
                 else:
-                    indicator_ = 1.0
-
+                    indicator_ = 0.  # Stay on MMD, never switch.
                 shared_feed_dict.update(
                     {z: random_batch_z,
                      mmd_to_cmd_indicator: indicator_})
-
                 sess.run([d_optim, g_optim], shared_feed_dict)
 
             elif model_type in ['mmd_gan_simple', 'kmmd_gan']:
@@ -1154,29 +1168,39 @@ def main():
             if step % log_step == 0 and step > 0:
                 # Read off from graph.
                 if model_type == 'ae_base':
-                    (ae_loss_, ae_base_loss_, d_loss_, mmd_, g_batch_,
-                     summary_result, loss1_, loss2_) = sess.run(
-                        [ae_loss, ae_base_loss, d_loss, mmd, g, summary_op,
-                         loss1, loss2],
-                        shared_feed_dict)
-                    g_full_normed_ = sess.run(g_full, {x_full: data})
+                    (ae_loss_, ae_base_loss_, enc_norm_loss_, d_loss_,
+                     mmd_, g_batch_, summary_result, loss1_, loss2_) = \
+                        sess.run(
+                            [ae_loss, ae_base_loss, enc_norm_loss, d_loss,
+                             mmd, g, summary_op, loss1, loss2],
+                            shared_feed_dict)
                     print(('AE_BASE. Iter: {}, ae_loss: {:.4f}, '
-                           'ae_base_loss: {:.4f}, d_loss: {:.4f}, mmd: {:.4f} '
-                           'loss1: {:.4f}, loss2: {:.4f}').format(
-                               step, ae_loss_, ae_base_loss_, d_loss_, mmd_,
-                               loss1_, loss2_))
-                    h_weights_ = sess.run(h_weights, shared_feed_dict)
+                           'ae_base_loss: {:.4f}, enc_norm_loss: {:.4f}, '
+                           'd_loss: {:.4f}, mmd: {:.4f}, loss1: {:.4f}, '
+                           'loss2: {:.4f}').format(
+                               step, ae_loss_, ae_base_loss_,
+                               enc_norm_loss_, d_loss_, mmd_, loss1_,
+                               loss2_))
+
+                    shared_feed_dict.update({x_full: data})
+                    h_weights_, enc_x_full_, g_full_normed_ = sess.run(
+                        [h_weights, enc_x_full, g_full], shared_feed_dict)
+                    # Extra troubleshooting logs.
+                    #enc_x_full_ = sess.run(enc_x_full, shared_feed_dict)
+                    #h_weights_, enc_x_full_ = sess.run([h_weights, enc_x_full],
+                    #    shared_feed_dict)
                     print('NORM: {}'.format(np.sum(np.square(h_weights_))))
 
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
                         [d_loss, ae_loss, mmd, loss1, loss2, summary_op],
                         shared_feed_dict)
-                    g_full_normed_ = sess.run(g_full, feed_dict={
-                        z_full: get_random_z(data_num, z_dim)})
                     print(('MMD_GAN. Iter: {}, d_loss: {:.4f}, ae_loss: {:.4f}, '
                             'mmd: {:.4f}, loss1: {:.4f}, loss2: {:.4f}').format(
                                step, d_loss_, ae_loss_, mmd_, loss1_, loss2_))
+                    enc_x_full_, g_full_normed_ = sess.run([enc_x_full, g_full],
+                        {z_full: get_random_z(data_num, z_dim),
+                         x_full: data})
 
                 elif model_type == 'mmd_gan_simple':
                     mmd_, loss1_, loss2_, summary_result = sess.run(
@@ -1298,6 +1322,8 @@ def main():
                     normed_moments_gens = compute_moments(g_full_normed_,
                         k_moments=k_moments+1)
                     empirical_moments_gens[step / log_step] = normed_moments_gens
+
+                    ###########################################################
                     # Plot empirical moments throughout training.
                     fig, (ax_data, ax_gens) = plt.subplots(2, 1)
                     cmap = plt.cm.get_cmap('cool', k_moments+1)
@@ -1317,6 +1343,7 @@ def main():
                         plot_dir, 'empirical_moments.png'))
                     plt.close(fig)
 
+                    ###########################################################
                     # Plot relative error of moments.
                     print('  data_normed moments: {}'.format(
                         normed_moments_data))
@@ -1368,6 +1395,18 @@ def main():
                         normed_moments_data_test))
                     print('  gens_normed moments: {}'.format(
                         normed_moments_gens))
+
+                    ###########################################################
+                    # Plot encoding space.
+                    if model_type in ['ae_base', 'mmd_gan']:
+                        if enc_x_full_.shape[1] == 2:
+                            fig, ax = plt.subplots()
+                            ax.scatter(*zip(*enc_x_full_), color='gray', alpha=0.2, label='enc')
+                            ax.legend()
+                            ax.set_title(tag)
+                            plt.savefig(os.path.join(
+                                plot_dir, 'enc_{}.png'.format(step)))
+                            plt.close(fig)
 
 
 if __name__ == "__main__":
