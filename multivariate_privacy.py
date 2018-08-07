@@ -1,3 +1,7 @@
+""" This script runs several privacy-oriented MMD-GAN, CMD, and MMD+AE style
+    generative models. 
+"""
+
 import argparse
 from time import time
 import matplotlib
@@ -14,17 +18,14 @@ sys.path.append('/home/maurice/mmd')
 import tensorflow as tf
 layers = tf.layers
 
-from tensorflow import keras
+#from tensorflow.python.keras._impl.keras import constraints 
+# print(constraints)
+# >> /usr/local/lib/python2.7/dist-packages/tensorflow/python/keras/_impl/keras
+from local_constraints import UnitNorm, DivideByMaxNorm, ClipNorm, EdgeIntervalNorm, DivideByMaxThenMinMaxNorm
 from mmd_utils import compute_mmd, compute_kmmd, compute_cmd, compute_moments, MMD_vs_Normal_by_filter
 from scipy.stats import multivariate_normal, shapiro
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import math_ops
-
-
-
-""" This script runs several privacy-oriented MMD-GAN, CMD, and MMD+AE style
-    generative models. 
-"""
 
 
 # Config.
@@ -41,6 +42,8 @@ parser.add_argument('--ae_variation', type=str, default=None,
                      choices=['pure', 'laplace', 'partition_ae_data',
                               'partition_enc_enc', 'subset', 'cmd_k', 'mmd',
                               'cmd_k_minus_k_plus_1'])
+parser.add_argument('--noise_type', type=str, default='laplace',
+                    choices=['laplace', 'gaussian'])
 parser.add_argument('--data_num', type=int, default=10000)
 parser.add_argument('--data_dimension', type=int, default=1)
 parser.add_argument('--percent_train', type=float, default=0.9)
@@ -70,6 +73,7 @@ model_type = args.model_type
 mmd_variation = args.mmd_variation
 cmd_variation = args.cmd_variation
 ae_variation = args.ae_variation
+noise_type = args.noise_type
 data_num = args.data_num
 data_dimension = args.data_dimension
 percent_train = args.percent_train
@@ -101,14 +105,14 @@ def get_random_z(gen_num, z_dim):
     return np.random.normal(size=[gen_num, z_dim])
 
 
-def dense(x, width, activation, batch_residual=False, name=None):
+def dense(x, width, activation, batch_residual=False, use_bias=True, name=None):
     if not batch_residual:
-        x_ = layers.dense(x, width, activation=activation, name=name)
+        x_ = layers.dense(x, width, activation=activation, use_bias=use_bias, name=name)
         r = layers.batch_normalization(x_)
         return r
     else:
         # TODO: Should this use bias?
-        x_ = layers.dense(x, width, activation=activation, use_bias=True)
+        x_ = layers.dense(x, width, activation=activation, use_bias=use_bias)
         r = layers.batch_normalization(x_) + x
         return r
 
@@ -124,29 +128,47 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
             # TODO: Should this use batch resid, and is it defined properly?
             x = dense(x, width, activation=activation, batch_residual=True)
 
-        # TODO: Figure out whether weights should be normed.
-        # For the Laplace noise, use normed_weights and no bias. For all others,
-        #   use standard dense layer.
-        #if normed_weights:
-        #    h = layers.dense(x, z_dim, activation=None, use_bias=False,
-        #        name='hidden_nw',
-        #        )
-        #        #kernel_constraint=keras.constraints.unit_norm(axis=None))
-        #        #kernel_constraint=keras.constraints.max_norm(1, axis=None))
-        #else:
-        #    h = dense(x, z_dim, activation=None, name='hidden')
         h = dense(x, z_dim, activation=None)
+        h = h / tf.norm(h)
 
     with tf.variable_scope('decoder', reuse=reuse) as vs_dec:
 
         if normed_weights:
-            x = layers.dense(h, width, activation=activation, name='hidden_nw',
-                )
-                #kernel_constraint=keras.constraints.unit_norm(axis=None))
-                #kernel_constraint=keras.constraints.max_norm(1, axis=None))
+            # Previous options, before defining custom constraints locally.
+            #kernel_constraint = keras.constraints.unit_norm(axis=None)
+            #kernel_constraint = keras.constraints.max_norm(axis=None)
+            constraint_types = [
+                'none', 'unit', 'divide_by_max', 'clip', 'edge_interval',
+                'dividebymax_then_minmax_norm']
+            choice = 'dividebymax_then_minmax_norm'
+            if choice == 'none':
+                kc = None
+            elif choice == 'unit':
+                kc = UnitNorm(axis=None)
+            elif choice == 'divide_by_max':
+                kc = DivideByMaxNorm(axis=None)
+            elif choice == 'clip':
+                kc = ClipNorm(axis=None)
+            elif choice == 'edge_interval':
+                kc = EdgeIntervalNorm(min_value=0.5, axis=None)
+            elif choice == 'dividebymax_then_minmax_norm':
+                num_weights = z_dim * width
+                laplace_sensitivity = 2 * num_weights
+                gaussian_sensitivity = 2 * np.sqrt(num_weights)
+                lower_bound_norm_pct = 0.999
+                if noise_type == 'laplace':
+                    sens_choice = laplace_sensitivity
+                elif noise_type == 'gaussian':
+                    sens_choice = gaussian_sensitivity
+                kc = DivideByMaxThenMinMaxNorm(
+                    min_value=lower_bound_norm_pct * sens_choice,
+                    max_value=sens_choice,
+                    axis=None)
+            # Define dense layer after encoding, with constrained weights.
+            x = layers.dense(h, width, activation=activation, use_bias=False,
+                name='hidden_nw', kernel_constraint=kc)
         else:
-            x = dense(h, width, activation=activation, name='hidden')
-        #x = dense(h, width, activation=activation)
+            x = dense(h, width, activation=activation, use_bias=False, name='hidden')
 
         for idx in range(depth - 1):
             # TODO: Should this use batch resid, and is it defined properly?
@@ -414,17 +436,40 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     g = ae_x
     g_full = ae_x_full
 
-    # Do weight management. For non laplace settings, it goes unused.
-    eps = 5.0
+    ##########################
+    # DO WEIGHT MANAGEMENT. For non laplace settings, it goes unused.
+    eps = 5
     delta = 1e-5
     h_weights = [v for v in tf.trainable_variables() if 'hidden' in v.name][0]
+    _, h_weights_variance = tf.nn.moments(h_weights, axes=[0])
+    h_weights_norm = tf.norm(h_weights)
+    h_weights_variance_norm = tf.norm(h_weights_variance)
+
+    # Define sensitivity.
     num_weights = np.prod(h_weights.shape.as_list())
-    gaussian_noise = np.random.normal(size=h_weights.shape.as_list(), loc=0,
-        scale=np.sqrt(8 * num_weights * np.log(1.25 / delta) / (eps**2)))
-    laplace_noise = np.random.laplace(size=h_weights.shape.as_list(), loc=0,
-        #scale=np.sqrt(2 * num_weights / (eps**2)))
-        scale=2 * num_weights / eps)
-    h_weights_update = tf.assign_add(h_weights, laplace_noise)
+    laplace_sensitivity = 2 * num_weights
+    gaussian_sensitivity = 2 * np.sqrt(num_weights) 
+
+    # Define noise to be added.
+    gaussian_noise = np.random.normal(
+        size=h_weights.shape.as_list(),
+        loc=0,
+        scale=np.sqrt(2 * (gaussian_sensitivity ** 2) * np.log(1.25 / delta) /
+            (eps**2)))
+    laplace_noise = np.random.laplace(
+        size=h_weights.shape.as_list(),
+        loc=0,
+        scale=laplace_sensitivity / eps)
+    if noise_type == 'laplace':
+        sens_choice = laplace_sensitivity
+        noise_to_add = laplace_noise
+    elif noise_type == 'gaussian':
+        sens_choice = gaussian_sensitivity
+        noise_to_add = gaussian_noise
+
+    h_weights_update = tf.assign_add(h_weights, noise_to_add)
+    h_weights_norm_loss = tf.abs(h_weights_norm - sens_choice)
+    ##########################
 
     # Compare distances between data, heldouts, and gen.
     avg_dist_g_to_x, distances_g_x = avg_nearest_neighbor_distance(g, x)
@@ -504,40 +549,43 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     elif ae_variation == 'laplace':
         # Define loss that encourages encodings near standard Gaussian.
         ae_base_loss = ae_loss
-        d_loss = ae_loss + 0. * enc_norm_loss
+        complementary_losses = (
+            0. * enc_norm_loss + 
+            0. * h_weights_variance_norm +
+            0.)
+        d_loss = ae_loss + complementary_losses
         d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
 
 
     # Define optim nodes, optionally clipping encoder gradients.
-    clip = 1
-    if clip:
-        if ae_variation != 'laplace':
-            # Clip all weights.
-            enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
-            dec_grads_, dec_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=dec_vars))
-            enc_grads_clipped_ = tuple(
-                [tf.clip_by_value(grad, -0.01, 0.01) for grad in enc_grads_])
-            d_grads_ = enc_grads_clipped_ + dec_grads_
-            d_vars_ = enc_vars_ + dec_vars_
-            d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
-        elif ae_variation == 'laplace':
-            # Just encoder, grads and vars.
-            enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
+    clip_ae_base = 1
+    if clip_ae_base:
+        # Clip all gradients.
+        enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
+        dec_grads_, dec_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=dec_vars))
+        enc_grads_clipped_ = tuple(
+            [tf.clip_by_value(grad, -0.01, 0.01) for grad in enc_grads_])
+        d_grads_ = enc_grads_clipped_ + dec_grads_
+        d_vars_ = enc_vars_ + dec_vars_
+        d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
+        #elif ae_variation == 'laplace':
+        #    # Just encoder, grads and vars.
+        #    enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
 
-            # Decoder grads and vars, split into hidden and non-hidden.
-            hidden_vars = [v for v in tf.trainable_variables() if 'hidden' in v.name]
-            not_hidden_vars = [v for v in dec_vars if v not in hidden_vars]
-            hv_grads_, hv_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=hidden_vars))
-            nhv_grads_, nhv_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=not_hidden_vars))
+        #    # Decoder grads and vars, split into hidden and non-hidden.
+        #    hidden_vars = [v for v in tf.trainable_variables() if 'hidden' in v.name]
+        #    not_hidden_vars = [v for v in dec_vars if v not in hidden_vars]
+        #    hv_grads_, hv_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=hidden_vars))
+        #    nhv_grads_, nhv_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=not_hidden_vars))
 
-            # Clip only weights of hidden layer, to [-1, 1].
-            hv_grads_clipped_ = tuple(
-                [tf.clip_by_value(grad, -1., 1.) for grad in hv_grads_])
+        #    # Clip only weights of hidden layer, to [-1, 1].
+        #    hv_grads_clipped_ = tuple(
+        #        [tf.clip_by_value(grad, -1., 1.) for grad in hv_grads_])
 
-            # Collect grads, collect vars, in the correct order, and apply them.
-            d_grads_ = enc_grads_ + hv_grads_clipped_ + nhv_grads_
-            d_vars_ = enc_vars_ + hv_vars_ + nhv_vars_
-            d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
+        #    # Collect grads, collect vars, in the correct order, and apply them.
+        #    d_grads_ = enc_grads_ + hv_grads_clipped_ + nhv_grads_
+        #    d_vars_ = enc_vars_ + hv_vars_ + nhv_vars_
+        #    d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
     else:
         d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
 
@@ -546,6 +594,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
 	tf.summary.scalar("loss/ae_loss", ae_loss),
 	tf.summary.scalar("loss/ae_base_loss", ae_base_loss),
 	tf.summary.scalar("loss/enc_norm_loss", enc_norm_loss),
+	tf.summary.scalar("loss/h_weights_variance_norm", h_weights_variance_norm),
 	tf.summary.scalar("loss/d_loss", d_loss),
 	tf.summary.scalar("loss/mmd", mmd),
 	tf.summary.scalar("loss/cmd", cmd),
@@ -557,8 +606,8 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     return (x, x_full, enc_x_full, x_test, x_precompute, x_test_precompute,
             avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, g, g_full, ae_loss, ae_base_loss,
-            enc_norm_loss, d_loss, mmd, cmd, loss1, loss2, lr_update,
-            d_optim, summary_op, h_weights, h_weights_update)
+            enc_norm_loss, h_weights_variance_norm, d_loss, mmd, cmd, loss1,
+            loss2, lr_update, d_optim, summary_op, h_weights, h_weights_norm, h_weights_update)
 
 
 def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
@@ -1005,8 +1054,8 @@ def main():
         (x, x_full, enc_x_full, x_test, x_precompute, x_test_precompute,
          avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, g, g_full, ae_loss, ae_base_loss,
-         enc_norm_loss, d_loss, mmd, cmd, loss1, loss2, lr_update,
-         d_optim, summary_op, h_weights, h_weights_update) = \
+         enc_norm_loss, h_weights_variance_norm, d_loss, mmd, cmd, loss1, loss2,
+         lr_update, d_optim, summary_op, h_weights, h_weights_norm, h_weights_update) = \
              build_model_ae_base(
                  batch_size, data_num, data_test_num, gen_num, out_dim, z_dim,
                  cmd_a, cmd_b)
@@ -1105,10 +1154,11 @@ def main():
             # Do an optimization step.
             if model_type == 'ae_base':
                 if ae_variation == 'laplace':
-                    # Added in noise.
-                    sess.run([h_weights_update, d_optim], shared_feed_dict)
+                    sess.run(h_weights_update, shared_feed_dict)
+                    sess.run(d_optim, shared_feed_dict)
                 else:
                     sess.run(d_optim, shared_feed_dict)
+
 
             elif model_type == 'mmd_gan':
                 # Define schedule of switching from MMD to CMD.
@@ -1168,34 +1218,39 @@ def main():
             if step % log_step == 0 and step > 0:
                 # Read off from graph.
                 if model_type == 'ae_base':
-                    (ae_loss_, ae_base_loss_, enc_norm_loss_, d_loss_,
+                    (ae_loss_, ae_base_loss_, enc_norm_loss_,
+                     h_weights_variance_norm_, d_loss_,
                      mmd_, g_batch_, summary_result, loss1_, loss2_) = \
                         sess.run(
-                            [ae_loss, ae_base_loss, enc_norm_loss, d_loss,
+                            [ae_loss, ae_base_loss, enc_norm_loss,
+                             h_weights_variance_norm, d_loss,
                              mmd, g, summary_op, loss1, loss2],
                             shared_feed_dict)
-                    print(('AE_BASE. Iter: {}, ae_loss: {:.4f}, '
+                    print(('\nAE_BASE. Iter: {}\n  ae_loss: {:.4f}, '
                            'ae_base_loss: {:.4f}, enc_norm_loss: {:.4f}, '
-                           'd_loss: {:.4f}, mmd: {:.4f}, loss1: {:.4f}, '
+                           'h_wt_var_norm: {:.4f}, d_loss: {:.4f}\n  '
+                           'mmd: {:.4f}, loss1: {:.4f}, '
                            'loss2: {:.4f}').format(
                                step, ae_loss_, ae_base_loss_,
-                               enc_norm_loss_, d_loss_, mmd_, loss1_,
-                               loss2_))
+                               enc_norm_loss_, h_weights_variance_norm_,
+                               d_loss_, mmd_, loss1_, loss2_))
 
                     shared_feed_dict.update({x_full: data})
-                    h_weights_, enc_x_full_, g_full_normed_ = sess.run(
-                        [h_weights, enc_x_full, g_full], shared_feed_dict)
+                    h_weights_, h_weights_norm_, enc_x_full_, g_full_normed_ = sess.run(
+                        [h_weights, h_weights_norm, enc_x_full, g_full], shared_feed_dict)
                     # Extra troubleshooting logs.
                     #enc_x_full_ = sess.run(enc_x_full, shared_feed_dict)
                     #h_weights_, enc_x_full_ = sess.run([h_weights, enc_x_full],
                     #    shared_feed_dict)
-                    print('NORM: {}'.format(np.sum(np.square(h_weights_))))
+                    print('  NORM calc: {}'.format(np.sum(np.square(h_weights_))))
+                    print('  NORM grap: {}'.format(h_weights_norm_))
+                    print(h_weights_)
 
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
                         [d_loss, ae_loss, mmd, loss1, loss2, summary_op],
                         shared_feed_dict)
-                    print(('MMD_GAN. Iter: {}, d_loss: {:.4f}, ae_loss: {:.4f}, '
+                    print(('\nMMD_GAN. Iter: {}\n  d_loss: {:.4f}, ae_loss: {:.4f}, '
                             'mmd: {:.4f}, loss1: {:.4f}, loss2: {:.4f}').format(
                                step, d_loss_, ae_loss_, mmd_, loss1_, loss2_))
                     enc_x_full_, g_full_normed_ = sess.run([enc_x_full, g_full],
@@ -1207,7 +1262,7 @@ def main():
                         [mmd, loss1, loss2, summary_op], shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
-                    print(('MMD_GAN_SIMPLE. Iter: {}, mmd: {:.4f}, loss1: {:.4f}, '
+                    print(('\nMMD_GAN_SIMPLE. Iter: {}\n  mmd: {:.4f}, loss1: {:.4f}, '
                            'loss2: {:.4f}').format(step, mmd_, loss1_, loss2_))
 
                 elif model_type == 'kmmd_gan':
@@ -1215,7 +1270,7 @@ def main():
                         [kmmd, mmd, loss1, loss2, summary_op], shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
-                    print(('KMMD_GAN. Iter: {}, kmmd: {:.4f}, mmd: {:.4f}, '
+                    print(('\nKMMD_GAN. Iter: {}\n  kmmd: {:.4f}, mmd: {:.4f}, '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, kmmd_, mmd_, loss1_, loss2_))
 
@@ -1226,7 +1281,7 @@ def main():
                             shared_feed_dict)
                     g_full_normed_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
-                    print(('CMD_GAN. Iter: {}, cmd: {:.4f}, mmd: {:.4f} '
+                    print(('CMD_GAN. Iter: {}\n  cmd: {:.4f}, mmd: {:.4f} '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, cmd_, mmd_, loss1_, loss2_))
 
@@ -1345,8 +1400,6 @@ def main():
 
                     ###########################################################
                     # Plot relative error of moments.
-                    print('  data_normed moments: {}'.format(
-                        normed_moments_data))
                     relative_error_of_moments_test = np.round(
                         (np.array(normed_moments_data_test) -
                          np.array(normed_moments_data)) /
@@ -1360,10 +1413,11 @@ def main():
                     relative_error_of_moments_gens[nmd_zero_indices] = 0.0
                     reom[step / log_step] = relative_error_of_moments_gens
 
-                    print('    RELATIVE_TEST: {}'.format(list(
-                        relative_error_of_moments_test)))
-                    print('    RELATIVE_GENS: {}'.format(list(
-                        relative_error_of_moments_gens)))
+                    if data_dimension == 1:
+                        print('    RELATIVE_TEST: {}'.format(list(
+                            relative_error_of_moments_test)))
+                        print('    RELATIVE_GENS: {}'.format(list(
+                            relative_error_of_moments_gens)))
 
                     # For plotting, zero-out moments that are likely zero, so
                     # their relative values don't dominate the plot.
@@ -1389,12 +1443,13 @@ def main():
                     plt.close(fig)
 
                     # Print normed moments to console.
-                    print('  data_normed moments: {}'.format(
-                        normed_moments_data))
-                    print('  test_normed moments: {}'.format(
-                        normed_moments_data_test))
-                    print('  gens_normed moments: {}'.format(
-                        normed_moments_gens))
+                    if data_dimension == 1:
+                        print('    data_normed moments: {}'.format(
+                            normed_moments_data))
+                        print('    test_normed moments: {}'.format(
+                            normed_moments_data_test))
+                        print('    gens_normed moments: {}'.format(
+                            normed_moments_gens))
 
                     ###########################################################
                     # Plot encoding space.
