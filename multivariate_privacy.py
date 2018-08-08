@@ -57,7 +57,7 @@ parser.add_argument('--z_dim', type=int, default=10)
 parser.add_argument('--log_step', type=int, default=1000)
 parser.add_argument('--max_step', type=int, default=100000)
 parser.add_argument('--learning_rate', type=float, default=1e-3)
-parser.add_argument('--lr_update_step', type=int, default=500000)
+parser.add_argument('--lr_update_step', type=int, default=10000)
 parser.add_argument('--optimizer', type=str, default='rmsprop',
                     choices=['adagrad', 'adam', 'gradientdescent', 'rmsprop'])
 parser.add_argument('--data_file', type=str, default='gp_data.txt')
@@ -98,6 +98,9 @@ activation = tf.nn.elu
 data_num = int(percent_train * data_num)  # Update based on % train.
 
 
+def mm(arr): print('  {}, {}'.format(np.min(arr), np.max(arr)))
+
+
 def get_random_z(gen_num, z_dim):
     """Generates 2d array of noise input data."""
     #return np.random.uniform(size=[gen_num, z_dim],
@@ -118,7 +121,7 @@ def dense(x, width, activation, batch_residual=False, use_bias=True, name=None):
 
 
 def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
-        reuse=False, normed_weights=False):
+        reuse=False, normed_weights=False, normed_encs=False):
     """Autoencodes input via a bottleneck layer h."""
     out_dim = x.shape[1]
     with tf.variable_scope('encoder', reuse=reuse) as vs_enc:
@@ -128,8 +131,41 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
             # TODO: Should this use batch resid, and is it defined properly?
             x = dense(x, width, activation=activation, batch_residual=True)
 
-        h = dense(x, z_dim, activation=None)
-        h = h / tf.norm(h)
+        if normed_encs:
+            enc_eps = 2.
+            enc_delta = 1e-5
+            option = 2
+
+            if option == 1:
+                # Use sigmoid, and sensitivity is z_dim.
+                h_normed = dense(x, z_dim, activation=tf.sigmoid)
+                sens1 = z_dim
+                sens2 = np.sqrt(z_dim)
+                h = h_normed + (
+                    np.random.laplace(size=z_dim, loc=0, scale=sens1 / enc_eps)
+                    #np.random.normal(size=z_dim, loc=0, scale=np.sqrt(
+                    #    2 * np.square(sens2) * np.log(1.25 / enc_delta) / (enc_eps ** 2)))
+                    )
+            if option == 2:
+                # Use steeper sigmoid to push values closer to edges. Sensitivity is z_dim.
+                h_ = dense(x, z_dim, activation=None)
+                steepness = 15
+                h_normed = 1. / (1 + tf.exp(-1. * steepness * h_))
+                sens1 = z_dim
+                sens2 = np.sqrt(z_dim)
+                h = h_normed + (
+                    np.random.laplace(size=z_dim, loc=0, scale=sens1 / enc_eps))
+            elif option == 3:
+                # Use no activation, then DivideByMaxNorm, and sensitivity is 2*sqrt(z_dim).
+                h_ = dense(x, z_dim, activation=None)
+                h_normed = h_ / tf.reduce_max(h_)
+                sens1 = 2 * z_dim
+                sens2 = 2 * np.sqrt(z_dim)
+                h = h_normed + (
+                    np.random.laplace(size=z_dim, loc=0, scale=sens1 / enc_eps))
+            #h = h / tf.norm(h)
+        else:
+            h = dense(x, z_dim, activation=None)
 
     with tf.variable_scope('decoder', reuse=reuse) as vs_dec:
 
@@ -140,7 +176,7 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
             constraint_types = [
                 'none', 'unit', 'divide_by_max', 'clip', 'edge_interval',
                 'dividebymax_then_minmax_norm']
-            choice = 'dividebymax_then_minmax_norm'
+            choice = 'none'
             if choice == 'none':
                 kc = None
             elif choice == 'unit':
@@ -155,7 +191,7 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
                 num_weights = z_dim * width
                 laplace_sensitivity = 2 * num_weights
                 gaussian_sensitivity = 2 * np.sqrt(num_weights)
-                lower_bound_norm_pct = 0.999
+                lower_bound_norm_pct = 0.9
                 if noise_type == 'laplace':
                     sens_choice = laplace_sensitivity
                 elif noise_type == 'gaussian':
@@ -168,7 +204,7 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
             x = layers.dense(h, width, activation=activation, use_bias=False,
                 name='hidden_nw', kernel_constraint=kc)
         else:
-            x = dense(h, width, activation=activation, use_bias=False, name='hidden')
+            x = dense(h, width, activation=activation, use_bias=True, name='hidden')
 
         for idx in range(depth - 1):
             # TODO: Should this use batch resid, and is it defined properly?
@@ -410,19 +446,32 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
 
     # Regular training placeholders.
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
-    x_full = tf.placeholder(tf.float32, [data_num, out_dim], name='x_full')
+    #x_full = tf.placeholder(tf.float32, [data_num, out_dim], name='x_full')
+    x_full = tf.placeholder(tf.float32, [None, out_dim], name='x_full')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
     avg_dist_x_to_x_test = tf.placeholder(tf.float32, shape=(),
         name='avg_dist_x_to_x_test')
 
     # Autoencoder.
     if ae_variation == 'laplace':
-        enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
-            width=width, depth=depth, activation=activation, z_dim=z_dim,
-            reuse=False, normed_weights=True)  # Variation uses normed_weights.
-        enc_x_full, ae_x_full, _, _ = autoencoder(x_full,
-            width=width, depth=depth, activation=activation, z_dim=z_dim,
-            reuse=True, normed_weights=True)
+        objects_to_norm = 'encodings'  # ['weights', 'encodings']
+
+        if objects_to_norm == 'weights':
+            enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
+                width=width, depth=depth, activation=activation, z_dim=z_dim,
+                reuse=False, normed_weights=True)  # NOTE: Also set constraint type in Decoder!
+            enc_x_full, ae_x_full, _, _ = autoencoder(x_full,
+                width=width, depth=depth, activation=activation, z_dim=z_dim,
+                reuse=True, normed_weights=True)
+
+        elif objects_to_norm == 'encodings':
+            enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
+                width=width, depth=depth, activation=activation, z_dim=z_dim,
+                reuse=False, normed_encs=True)  # NOTE: Also set norm type in Encoder.
+            enc_x_full, ae_x_full, _, _ = autoencoder(x_full,
+                width=width, depth=depth, activation=activation, z_dim=z_dim,
+                reuse=True, normed_encs=True)
+
     else:
         enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
             width=width, depth=depth, activation=activation, z_dim=z_dim,
@@ -432,6 +481,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
             reuse=True)
 
     ae_loss = tf.reduce_mean(tf.square(ae_x - x))
+    m1_loss = tf.abs(tf.reduce_mean(tf.reduce_mean(ae_x, axis=0) - tf.reduce_mean(x, axis=0)))
     enc_norm_loss = MMD_vs_Normal_by_filter(enc_x, np.ones([batch_size, 1], dtype=np.float32))
     g = ae_x
     g_full = ae_x_full
@@ -451,21 +501,21 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
     gaussian_sensitivity = 2 * np.sqrt(num_weights) 
 
     # Define noise to be added.
-    gaussian_noise = np.random.normal(
+    wt_ns_gaussian = np.random.normal(
         size=h_weights.shape.as_list(),
         loc=0,
         scale=np.sqrt(2 * (gaussian_sensitivity ** 2) * np.log(1.25 / delta) /
             (eps**2)))
-    laplace_noise = np.random.laplace(
+    wt_ns_laplace = np.random.laplace(
         size=h_weights.shape.as_list(),
         loc=0,
         scale=laplace_sensitivity / eps)
     if noise_type == 'laplace':
         sens_choice = laplace_sensitivity
-        noise_to_add = laplace_noise
+        noise_to_add = wt_ns_laplace
     elif noise_type == 'gaussian':
         sens_choice = gaussian_sensitivity
-        noise_to_add = gaussian_noise
+        noise_to_add = wt_ns_gaussian
 
     h_weights_update = tf.assign_add(h_weights, noise_to_add)
     h_weights_norm_loss = tf.abs(h_weights_norm - sens_choice)
@@ -552,13 +602,15 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         complementary_losses = (
             0. * enc_norm_loss + 
             0. * h_weights_variance_norm +
+            0. * m1_loss +
+            0. * mmd +
             0.)
         d_loss = ae_loss + complementary_losses
         d_optim = d_opt.minimize(d_loss, var_list=enc_vars + dec_vars)
 
 
     # Define optim nodes, optionally clipping encoder gradients.
-    clip_ae_base = 1
+    clip_ae_base = 0
     if clip_ae_base:
         # Clip all gradients.
         enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
@@ -600,6 +652,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
 	tf.summary.scalar("loss/cmd", cmd),
 	tf.summary.scalar("loss/loss1", loss1),
 	tf.summary.scalar("loss/loss2", loss2),
+	tf.summary.scalar("loss/m1_loss", m1_loss),
 	tf.summary.scalar("misc/lr", lr),
     ])
 
@@ -1134,7 +1187,6 @@ def main():
         reom = relative_error_of_moments
 
 
-
         #######################################################################
         # train()
         start_time = time()
@@ -1149,12 +1201,13 @@ def main():
             shared_feed_dict = {
                 x: random_batch_data,
                 x_test: random_batch_data_test,
+                x_full: data,
                 avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_}
 
             # Do an optimization step.
             if model_type == 'ae_base':
                 if ae_variation == 'laplace':
-                    sess.run(h_weights_update, shared_feed_dict)
+                    #sess.run(h_weights_update, shared_feed_dict)
                     sess.run(d_optim, shared_feed_dict)
                 else:
                     sess.run(d_optim, shared_feed_dict)
@@ -1220,11 +1273,11 @@ def main():
                 if model_type == 'ae_base':
                     (ae_loss_, ae_base_loss_, enc_norm_loss_,
                      h_weights_variance_norm_, d_loss_,
-                     mmd_, g_batch_, summary_result, loss1_, loss2_) = \
+                     mmd_, summary_result, loss1_, loss2_) = \
                         sess.run(
                             [ae_loss, ae_base_loss, enc_norm_loss,
                              h_weights_variance_norm, d_loss,
-                             mmd, g, summary_op, loss1, loss2],
+                             mmd, summary_op, loss1, loss2],
                             shared_feed_dict)
                     print(('\nAE_BASE. Iter: {}\n  ae_loss: {:.4f}, '
                            'ae_base_loss: {:.4f}, enc_norm_loss: {:.4f}, '
@@ -1235,16 +1288,30 @@ def main():
                                enc_norm_loss_, h_weights_variance_norm_,
                                d_loss_, mmd_, loss1_, loss2_))
 
-                    shared_feed_dict.update({x_full: data})
-                    h_weights_, h_weights_norm_, enc_x_full_, g_full_normed_ = sess.run(
-                        [h_weights, h_weights_norm, enc_x_full, g_full], shared_feed_dict)
+                    shared_feed_dict.update({x_full: np.array(
+                        [data[d] for d in np.random.choice(len(data), batch_size)])})
+                    g_batch_, g_full_, h_weights_, h_weights_norm_, enc_x_full_ = \
+                        sess.run(
+                            [g, g_full, h_weights, h_weights_norm, enc_x_full],
+                            shared_feed_dict)
+                    #h_weights_, h_weights_norm_, enc_x_full_, g_full_ = sess.run(
+                    #    [h_weights, h_weights_norm, enc_x_full, g_full], shared_feed_dict)
+
                     # Extra troubleshooting logs.
                     #enc_x_full_ = sess.run(enc_x_full, shared_feed_dict)
                     #h_weights_, enc_x_full_ = sess.run([h_weights, enc_x_full],
                     #    shared_feed_dict)
-                    print('  NORM calc: {}'.format(np.sum(np.square(h_weights_))))
-                    print('  NORM grap: {}'.format(h_weights_norm_))
-                    print(h_weights_)
+                    #print('  NORM calc: {}'.format(np.sum(np.square(h_weights_))))
+                    #print('  NORM grap: {}'.format(h_weights_norm_))
+                    #print(h_weights_)
+                    print('DATA_FULL')
+                    mm(data)
+                    print('DATA_BATCH')
+                    mm(random_batch_data)
+                    print('G_BATCH')
+                    mm(g_batch_)
+                    print('GFULL')
+                    mm(g_full_)
 
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
@@ -1253,14 +1320,14 @@ def main():
                     print(('\nMMD_GAN. Iter: {}\n  d_loss: {:.4f}, ae_loss: {:.4f}, '
                             'mmd: {:.4f}, loss1: {:.4f}, loss2: {:.4f}').format(
                                step, d_loss_, ae_loss_, mmd_, loss1_, loss2_))
-                    enc_x_full_, g_full_normed_ = sess.run([enc_x_full, g_full],
+                    enc_x_full_, g_full_ = sess.run([enc_x_full, g_full],
                         {z_full: get_random_z(data_num, z_dim),
                          x_full: data})
 
                 elif model_type == 'mmd_gan_simple':
                     mmd_, loss1_, loss2_, summary_result = sess.run(
                         [mmd, loss1, loss2, summary_op], shared_feed_dict)
-                    g_full_normed_ = sess.run(g_full, feed_dict={
+                    g_full_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
                     print(('\nMMD_GAN_SIMPLE. Iter: {}\n  mmd: {:.4f}, loss1: {:.4f}, '
                            'loss2: {:.4f}').format(step, mmd_, loss1_, loss2_))
@@ -1268,7 +1335,7 @@ def main():
                 elif model_type == 'kmmd_gan':
                     kmmd_, mmd_, loss1_, loss2_, summary_result = sess.run(
                         [kmmd, mmd, loss1, loss2, summary_op], shared_feed_dict)
-                    g_full_normed_ = sess.run(g_full, feed_dict={
+                    g_full_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
                     print(('\nKMMD_GAN. Iter: {}\n  kmmd: {:.4f}, mmd: {:.4f}, '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
@@ -1279,7 +1346,7 @@ def main():
                         sess.run(
                             [cmd, cmd_k_terms, mmd, loss1, loss2, summary_op],
                             shared_feed_dict)
-                    g_full_normed_ = sess.run(g_full, feed_dict={
+                    g_full_ = sess.run(g_full, feed_dict={
                         z_full: get_random_z(data_num, z_dim)})
                     print(('CMD_GAN. Iter: {}\n  cmd: {:.4f}, mmd: {:.4f} '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
@@ -1288,14 +1355,16 @@ def main():
                 # TODO: DIAGNOSE NaNs.
                 if np.isnan(mmd_):
                     pdb.set_trace()
-                kmmd__ = compute_kmmd(data[:100], g_full_normed_[:100],
+                kmmd__ = compute_kmmd(data[:100], g_full_[:100],
                     sigma_list=[sigma], k_moments=k_moments,
                     kernel_choice=kernel_choice, verbose=0)
 
                 ###############################################################
                 # Unormalize data and simulations for all logs and plots.
+                g_batch_unnormed = unnormalize(
+                    g_batch_, data_raw_mean, data_raw_std)
                 g_full_unnormed = unnormalize(
-                    g_full_normed_, data_raw_mean, data_raw_std)
+                    g_full_, data_raw_mean, data_raw_std)
                 data_unnormed = unnormalize(
                     data, data_raw_mean, data_raw_std)
                 data_test_unnormed = unnormalize(
@@ -1352,12 +1421,14 @@ def main():
                 # PLOT data and simulations.
                 if out_dim == 1:
                     fig, ax = plt.subplots()
-                    ax.hist(data_unnormed, normed=True, bins=30, color='gray', alpha=0.8,
+                    ax.hist(data_unnormed, normed=True, bins=30, color='gray', alpha=0.3,
                         label='data')
-                    ax.hist(data_test_unnormed, normed=True, bins=30, color='red', alpha=0.3,
-                        label='test')
-                    ax.hist(g_full_unnormed, normed=True, bins=30, color='green', alpha=0.8,
+                    #ax.hist(data_test_unnormed, normed=True, bins=30, color='red', alpha=0.3,
+                    #    label='test')
+                    ax.hist(g_full_unnormed, normed=True, bins=30, color='green', alpha=0.3,
                         label='gens')
+                    ax.hist(g_batch_unnormed, normed=True, bins=30, color='blue', alpha=0.3,
+                        label='gens_batch')
                     plt.legend()
                     plt.savefig(os.path.join(plot_dir, '{}.png'.format(step)))
                     plt.close(fig)
@@ -1374,7 +1445,7 @@ def main():
                     
                 # PLOT moment diagnostics.
                 if data_dimension <= 2:
-                    normed_moments_gens = compute_moments(g_full_normed_,
+                    normed_moments_gens = compute_moments(g_full_,
                         k_moments=k_moments+1)
                     empirical_moments_gens[step / log_step] = normed_moments_gens
 
