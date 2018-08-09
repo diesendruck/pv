@@ -23,6 +23,7 @@ layers = tf.layers
 # >> /usr/local/lib/python2.7/dist-packages/tensorflow/python/keras/_impl/keras
 from local_constraints import UnitNorm, DivideByMaxNorm, ClipNorm, EdgeIntervalNorm, DivideByMaxThenMinMaxNorm
 from mmd_utils import compute_mmd, compute_kmmd, compute_cmd, compute_moments, MMD_vs_Normal_by_filter
+from scipy.spatial.distance import pdist, cdist 
 from scipy.stats import multivariate_normal, shapiro
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import math_ops
@@ -319,7 +320,7 @@ def unnormalize(data_normed, data_raw_mean, data_raw_std):
 
 
 def prepare_dirs(load_existing):
-    log_dir = 'logs/logs_{}'.format(tag)
+    log_dir = 'moment_effect_logs/logs_{}'.format(tag)
     checkpoint_dir = os.path.join(log_dir, 'checkpoints')
     plot_dir = os.path.join(log_dir, 'plots')
     g_out_dir = os.path.join(log_dir, 'g_out')
@@ -1059,9 +1060,9 @@ def main():
     # Load data and prep dirs.
     (data, data_test, data_num, data_test_num, out_dim, data_raw_mean,
      data_raw_std) = load_data(data_num, percent_train)
-    normed_moments_data = compute_moments(data, k_moments=k_moments+1)
-    normed_moments_data_test = compute_moments(data_test, k_moments=k_moments+1)
-    nmd_zero_indices = np.argwhere(np.array(normed_moments_data) < 0.1) 
+    moments_of_normed_data = compute_moments(data, k_moments=k_moments)
+    moments_of_normed_data_test = compute_moments(data_test, k_moments=k_moments)
+    nmd_zero_indices = np.argwhere(np.array(moments_of_normed_data) < 0.1) 
 
     # Compute baseline statistics on moments for data set.
     num_samples = 100
@@ -1102,6 +1103,98 @@ def main():
     g_out_file = os.path.join(g_out_dir, 'g_out.txt')
     if os.path.isfile(g_out_file):
         os.remove(g_out_file)
+
+    ###########################################################################
+    ###########################################################################
+    # No model. Add noise to data. Then compare moments of noisy data vs those
+    #   of regular data.
+    sens1 = np.max(pdist(data))
+    sens2 = sens1
+    eps_levels = np.array(range(1, 10) + [15, 20, 50, 100])
+    delta = 1e-5
+    noise = 'laplace'  # ['gaussian', 'laplace']
+    repetitions = 1000
+    l1_errors_of_moments = np.zeros((repetitions, len(eps_levels), k_moments))
+
+    # Compute errors of moments.
+    for i in range(repetitions):
+        for j, eps in enumerate(eps_levels):
+            if noise == 'laplace':
+                data_lap = data + np.random.laplace(
+                    size=data.shape, loc=0, scale=sens1 / eps)
+            elif noise == 'gaussian':
+                data_lap = data + np.random.normal(
+                    size=data.shape, loc=0,
+                    scale=np.sqrt(2 * (sens2 ** 2) * np.log(1.25 / delta) / (eps ** 2)))
+            moments_data_lap = compute_moments(data_lap, k_moments=k_moments)
+            md = np.array(moments_of_normed_data)
+            mdl = np.array(moments_data_lap)
+            errors = np.abs(md - mdl)
+            l1_errors_of_moments[i][j] = errors
+
+    l1_errors_of_moments = np.mean(l1_errors_of_moments, axis=0)
+
+    # Plot the errors all together.
+    fig, ax = plt.subplots(2, 1)
+    cmap = plt.cm.get_cmap('cool', k_moments)
+    labels = ['m{}'.format(i) for i in range(1, k_moments+1)]
+    for i in range(k_moments):
+        ax[0].plot(eps_levels, np.log(l1_errors_of_moments[:,i]), label=labels[i])
+    ax[0].legend()
+    ax[0].set_xlabel('epsilon')
+    ax[0].set_ylabel('log l1 error')
+    ax[1].hist(data, normed=True, bins=30, alpha=0.5)
+    ax[1].set_xlabel('data')
+    plt.suptitle('data vs dp({})_data, L1 error of moments'.format(noise))
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        plot_dir, 'result_moment_effect_{}.png'.format(noise)))
+    plt.close(fig)
+    
+    # Plot the errors separately.
+    fig, axes = plt.subplots(k_moments, 1)
+    cmap = plt.cm.get_cmap('cool', k_moments)
+    for i in range(1, k_moments+1):
+        axes[i-1].plot(eps_levels, l1_errors_of_moments[:,i-1], label='m{}'.format(i), c=cmap(i-1))
+    for i in range(1, k_moments+1):
+        axes[i-1].legend()
+    plt.legend()
+    plt.suptitle('data vs dp({})_data, L1 error of moments'.format(noise))
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        plot_dir, 'result_moment_effect_separated.png'))
+    plt.close(fig)
+
+    # Plot hists of both distributions.
+    laplace_eps = 1
+    data_lap = data + np.random.laplace(
+        size=data.shape, loc=0, scale=sens1 / laplace_eps)
+    moments_data_lap = compute_moments(data_lap, k_moments=k_moments)
+    md = np.array(moments_of_normed_data)
+    mdl = np.array(moments_data_lap)
+    fig, axes = plt.subplots(2, 2)
+    ax_hist_d = axes[0][0]
+    ax_mom_d = axes[0][1]
+    ax_hist_dl = axes[1][0]
+    ax_mom_dl = axes[1][1]
+    ax_hist_d.hist(data, normed=True, bins=30, alpha=0.5)
+    ax_hist_dl.hist(data_lap, normed=True, bins=30, alpha=0.5)
+    cmap = plt.cm.get_cmap('cool', k_moments+1)
+    for i in range(k_moments):
+        ax_mom_d.axhline(y=md[i], label='m{}'.format(i+1), c=cmap(i))
+        ax_mom_dl.axhline(y=mdl[i], label='m{}'.format(i+1), c=cmap(i))
+    ax_mom_d.legend()
+    ax_mom_dl.legend()
+    plt.suptitle('{}, data vs data_laplace, eps={}'.format(tag, laplace_eps))
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        plot_dir, 'result_moment_effect.png'))
+    plt.close(fig)
+
+    pdb.set_trace()
+    sys.exit()
+    ###########################################################################
+    ###########################################################################
 
     # build_all()
     # Build model.
@@ -1502,11 +1595,11 @@ def main():
                     fig, (ax_data, ax_gens) = plt.subplots(2, 1)
                     cmap = plt.cm.get_cmap('cool', k_moments+1)
                     for i in range(k_moments+1):
-                        ax_data.axhline(y=normed_moments_data[i], 
+                        ax_data.axhline(y=moments_of_normed_data[i], 
                                         label='m{}'.format(i+1), c=cmap(i))
                         ax_gens.plot(empirical_moments_gens[:step/log_step, i],
                                      label='m{}'.format(i+1), c=cmap(i), alpha=0.8)
-                    ax_data.set_ylim(min(normed_moments_data)-0.5, max(normed_moments_data)+0.5)
+                    ax_data.set_ylim(min(moments_of_normed_data)-0.5, max(moments_of_normed_data)+0.5)
                     ax_gens.set_xlabel('Empirical moments, gens')
                     ax_data.set_xlabel('Empirical moments, data')
                     ax_gens.legend()
@@ -1520,13 +1613,13 @@ def main():
                     ###########################################################
                     # Plot relative error of moments.
                     relative_error_of_moments_test = np.round(
-                        (np.array(normed_moments_data_test) -
-                         np.array(normed_moments_data)) /
-                         np.array(normed_moments_data), 2)
+                        (np.array(moments_of_normed_data_test) -
+                         np.array(moments_of_normed_data)) /
+                         np.array(moments_of_normed_data), 2)
                     relative_error_of_moments_gens = np.round(
                         (np.array(normed_moments_gens) -
-                         np.array(normed_moments_data)) /
-                         np.array(normed_moments_data), 2)
+                         np.array(moments_of_normed_data)) /
+                         np.array(moments_of_normed_data), 2)
 
                     relative_error_of_moments_test[nmd_zero_indices] = 0.0
                     relative_error_of_moments_gens[nmd_zero_indices] = 0.0
@@ -1564,9 +1657,9 @@ def main():
                     # Print normed moments to console.
                     if data_dimension == 1:
                         print('    data_normed moments: {}'.format(
-                            normed_moments_data))
+                            moments_of_normed_data))
                         print('    test_normed moments: {}'.format(
-                            normed_moments_data_test))
+                            moments_of_normed_data_test))
                         print('    gens_normed moments: {}'.format(
                             normed_moments_gens))
 
