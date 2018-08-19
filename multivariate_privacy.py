@@ -39,12 +39,12 @@ parser.add_argument('--cmd_variation', type=str, default=None,
                      choices=['minus_k_plus_1', 'minus_mmd',
                               'prog_cmd', 'mmd_to_cmd', 'fractional'])
 parser.add_argument('--ae_variation', type=str, default=None,
-                     choices=['pure', 'laplace', 'partition_ae_data',
+                     choices=['pure', 'enc_noise', 'partition_ae_data',
                               'partition_enc_enc', 'subset', 'cmd_k', 'mmd',
                               'cmd_k_minus_k_plus_1'])
-parser.add_argument('--laplace_eps', type=float, default=2)
 parser.add_argument('--noise_type', type=str, default='laplace',
                     choices=['laplace', 'gaussian'])
+parser.add_argument('--laplace_eps', type=float, default=2)
 parser.add_argument('--data_num', type=int, default=10000)
 parser.add_argument('--data_dimension', type=int, default=1)
 parser.add_argument('--percent_train', type=float, default=0.9)
@@ -136,36 +136,39 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
         if normed_encs:
             enc_eps = laplace_eps
             enc_delta = 1e-5
-            option = 2
+            option = 3
 
             if option == 1:
                 # Use sigmoid, and sensitivity is z_dim.
                 h_normed = dense(x, z_dim, activation=tf.sigmoid)
                 sens1 = z_dim
                 sens2 = np.sqrt(z_dim)
-                h = h_normed + (
+                h_noised = h_normed + (
                     np.random.laplace(size=z_dim, loc=0, scale=sens1 / enc_eps)
                     #np.random.normal(size=z_dim, loc=0, scale=np.sqrt(
                     #    2 * np.square(sens2) * np.log(1.25 / enc_delta) / (enc_eps ** 2)))
                     )
             if option == 2:
-                # Use steeper sigmoid to push values closer to edges. Sensitivity is z_dim.
+                # Use steeper sigmoid to push values closer to edges.
+                # Sensitivity is z_dim.
                 h_ = dense(x, z_dim, activation=None)
                 steepness = 15
                 h_normed = 1. / (1 + tf.exp(-1. * steepness * h_))
                 sens1 = z_dim
                 sens2 = np.sqrt(z_dim)
-                h = h_normed + (
+                h_noised = h_normed + (
                     np.random.laplace(size=z_dim, loc=0, scale=sens1 / enc_eps))
             elif option == 3:
-                # Use no activation, then DivideByMaxNorm, and sensitivity is 2*sqrt(z_dim).
+                # Use no activation, then DivideByMaxNorm, and sensitivity is
+                # 2*sqrt(z_dim).
                 h_ = dense(x, z_dim, activation=None)
                 h_normed = h_ / tf.reduce_max(h_)
                 sens1 = 2 * z_dim
                 sens2 = 2 * np.sqrt(z_dim)
-                h = h_normed + (
+                h_noised = h_normed + (
                     np.random.laplace(size=z_dim, loc=0, scale=sens1 / enc_eps))
-            #h = h / tf.norm(h)
+            h = h_noised
+            h_nonoise = h_normed
         else:
             h = dense(x, z_dim, activation=None)
 
@@ -206,17 +209,30 @@ def autoencoder(x, width=3, depth=3, activation=tf.nn.elu, z_dim=3,
             x = layers.dense(h, width, activation=activation, use_bias=False,
                 name='hidden_nw', kernel_constraint=kc)
         else:
-            x = dense(h, width, activation=activation, use_bias=True, name='hidden')
+            x = dense(h, width, activation=activation, use_bias=True,
+                name='hidden')
+            if normed_encs:
+                x_nonoise = dense(h_nonoise, width, activation=activation,
+                    use_bias=True, name='hidden_nonoise')
 
         for idx in range(depth - 1):
-            # TODO: Should this use batch resid, and is it defined properly?
             x = dense(x, width, activation=activation, batch_residual=True)
+            if normed_encs:
+                x_nonoise = dense(x_nonoise, width, activation=activation,
+                    batch_residual=True)
+
 
         ae = dense(x, out_dim, activation=None)
+        if normed_encs:
+            ae_nonoise = dense(x_nonoise, out_dim, activation=None)
+
 
     vars_enc = tf.contrib.framework.get_variables(vs_enc)
     vars_dec = tf.contrib.framework.get_variables(vs_dec)
-    return h, ae, vars_enc, vars_dec
+    if not normed_encs:
+        return h, ae, vars_enc, vars_dec
+    elif normed_encs:
+        return h, h_nonoise, ae, ae_nonoise, vars_enc, vars_dec
 
 
 def generator(z, width=3, depth=3, activation=tf.nn.elu, out_dim=2,
@@ -456,7 +472,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         name='avg_dist_x_to_x_test')
 
     # Autoencoder.
-    if ae_variation == 'laplace':
+    if ae_variation == 'enc_noise':
         objects_to_norm = 'encodings'  # ['weights', 'encodings']
 
         if objects_to_norm == 'weights':
@@ -468,12 +484,21 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
                 reuse=True, normed_weights=True)
 
         elif objects_to_norm == 'encodings':
-            enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
-                width=width, depth=depth, activation=activation, z_dim=z_dim,
-                reuse=False, normed_encs=True)  # NOTE: Also set norm type in Encoder.
-            enc_x_readonly, ae_x_readonly, _, _ = autoencoder(x_readonly,
-                width=width, depth=depth, activation=activation, z_dim=z_dim,
-                reuse=True, normed_encs=True)
+            # NOTE: Also set norm type in Encoder.
+            #enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
+            #    width=width, depth=depth, activation=activation, z_dim=z_dim,
+            #    reuse=False, normed_encs=True)  # NOTE: Also set norm type in Encoder.
+            #enc_x_readonly, ae_x_readonly, _, _ = autoencoder(x_readonly,
+            #    width=width, depth=depth, activation=activation, z_dim=z_dim,
+            #    reuse=True, normed_encs=True)
+            enc_x, enc_x_nonoise, ae_x, ae_x_nonoise, enc_vars, dec_vars = \
+                autoencoder(x, width=width, depth=depth, activation=activation,
+                    z_dim=z_dim, reuse=False, normed_encs=True)
+            (enc_x_readonly, enc_x_nonoise_readonly,
+             ae_x_readonly, ae_x_nonoise_readonly, _, _) = \
+                autoencoder(x_readonly, width=width, depth=depth,
+                    activation=activation, z_dim=z_dim, reuse=True,
+                    normed_encs=True)
 
     else:
         enc_x, ae_x, enc_vars, dec_vars = autoencoder(x,
@@ -483,9 +508,17 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
             width=width, depth=depth, activation=activation, z_dim=z_dim,
             reuse=True)
 
-    ae_loss = tf.reduce_mean(tf.square(ae_x - x))
+    # Define autoencoder losses.
+    if ae_variation == 'enc_noise':
+        ae_loss = (tf.reduce_mean(tf.square(ae_x - x)) + 
+                   tf.reduce_mean(tf.square(ae_x_nonoise - x))) 
+    else:
+        ae_loss = tf.reduce_mean(tf.square(ae_x - x))
     m1_loss = tf.abs(tf.reduce_mean(tf.reduce_mean(ae_x, axis=0) - tf.reduce_mean(x, axis=0)))
-    enc_norm_loss = MMD_vs_Normal_by_filter(enc_x, np.ones([batch_size, 1], dtype=np.float32))
+    enc_norm_loss = MMD_vs_Normal_by_filter(
+        enc_x, np.ones([batch_size, 1], dtype=np.float32))
+    enc_nonoise_norm_loss = MMD_vs_Normal_by_filter(
+        enc_x_nonoise, np.ones([batch_size, 1], dtype=np.float32))
     g = ae_x
     g_readonly = ae_x_readonly
 
@@ -599,11 +632,12 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
             use_tf=True, cmd_a=cmd_a, cmd_b=cmd_b)
         ae_base_loss = 2 * cmd_k - cmd_k_minus_k_plus_1
         d_loss = ae_loss + 2. * ae_base_loss
-    elif ae_variation == 'laplace':
+    elif ae_variation == 'enc_noise':
         # Define loss that encourages encodings near standard Gaussian.
         ae_base_loss = ae_loss
         complementary_losses = (
-            0. * enc_norm_loss + 
+            .01 * enc_norm_loss + 
+            .01 * enc_nonoise_norm_loss + 
             0. * h_weights_variance_norm +
             0. * m1_loss +
             0. * mmd +
@@ -623,7 +657,7 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         d_grads_ = enc_grads_clipped_ + dec_grads_
         d_vars_ = enc_vars_ + dec_vars_
         d_optim = d_opt.apply_gradients(zip(d_grads_, d_vars_))
-        #elif ae_variation == 'laplace':
+        #elif ae_variation == 'enc_noise':
         #    # Just encoder, grads and vars.
         #    enc_grads_, enc_vars_ = zip(*d_opt.compute_gradients(d_loss, var_list=enc_vars))
 
@@ -659,7 +693,8 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
 	tf.summary.scalar("misc/lr", lr),
     ])
 
-    return (x, x_readonly, enc_x_readonly, x_test, x_precompute, x_test_precompute,
+    return (x, x_readonly, enc_x_readonly, enc_x_nonoise_readonly, x_test,
+            x_precompute, x_test_precompute,
             avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, g, g_readonly, ae_loss, ae_base_loss,
             enc_norm_loss, h_weights_variance_norm, d_loss, mmd, cmd, loss1,
@@ -781,7 +816,8 @@ def build_model_mmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 	tf.summary.scalar("misc/lr", lr),
     ])
 
-    return (x, x_readonly, enc_x_readonly, z, z_readonly, x_test, x_precompute,
+    return (x, x_readonly, enc_x_readonly, enc_x_nonoise_readonly, z,
+            z_readonly, x_test, x_precompute,
             x_test_precompute, avg_dist_x_to_x_test,
             avg_dist_x_to_x_test_precomputed, distances_xt_xp,
             mmd_to_cmd_indicator, g, g_readonly, ae_loss, d_loss, mmd, cmd, loss1,
@@ -1107,7 +1143,8 @@ def main():
     # Build model.
     if model_type == 'ae_base':
         # Define compact space for CMD.
-        (x, x_readonly, enc_x_readonly, x_test, x_precompute, x_test_precompute,
+        (x, x_readonly, enc_x_readonly, enc_x_nonoise_readonly, x_test,
+         x_precompute, x_test_precompute,
          avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, g, g_readonly, ae_loss, ae_base_loss,
          enc_norm_loss, h_weights_variance_norm, d_loss, mmd, cmd, loss1, loss2,
@@ -1117,7 +1154,8 @@ def main():
                  cmd_a, cmd_b)
 
     elif model_type == 'mmd_gan':
-        (x, x_readonly, enc_x_readonly, z, z_readonly, x_test, x_precompute,
+        (x, x_readonly, enc_x_readonly, enc_x_nonoise_readonly, z, z_readonly,
+         x_test, x_precompute,
          x_test_precompute, avg_dist_x_to_x_test,
          avg_dist_x_to_x_test_precomputed, distances_xt_xp,
          mmd_to_cmd_indicator, g, g_readonly, ae_loss, d_loss, mmd, cmd, loss1,
@@ -1209,7 +1247,7 @@ def main():
 
             # Do an optimization step.
             if model_type == 'ae_base':
-                if ae_variation == 'laplace':
+                if ae_variation == 'enc_noise':
                     #sess.run(h_weights_update, shared_feed_dict)
                     sess.run(d_optim, shared_feed_dict)
                 else:
@@ -1316,8 +1354,10 @@ def main():
 
                     # Test the full data.
                     shared_feed_dict.update({x_readonly: batch4})
-                    g_full_readonly_, enc_x_full_readonly_ = sess.run(
-                        [g_readonly, enc_x_readonly], shared_feed_dict)
+                    g_full_readonly_, enc_x_full_readonly_, enc_x_nonoise_full_readonly_ = \
+                        sess.run(
+                            [g_readonly, enc_x_readonly, enc_x_nonoise_readonly],
+                            shared_feed_dict)
 
                     print('BATCH1')
                     mm(batch1)
@@ -1341,6 +1381,7 @@ def main():
                     # TODO: NEED TO ADD BACK g_readonly_.
                     g_full_ = g_full_readonly_
                     enc_x_full_ = enc_x_full_readonly_
+                    enc_x_nonoise_full_ = enc_x_nonoise_full_readonly_
 
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
@@ -1467,13 +1508,13 @@ def main():
                     #ax.hist(data_test, normed=True, bins=30, color='red', alpha=0.3,
                     #    label='test')
                     ax.hist(g_batch_, normed=True, bins=30, color='orange', alpha=0.3,
-                        label='batch')
+                        label='g_batch')
                     ax.hist(g_batch2_, normed=True, bins=30, color='yellow', alpha=0.3,
-                        label='batch2')
+                        label='g_batch2')
                     ax.hist(g_batch2_readonly_, normed=True, bins=30, color='black', alpha=0.3,
-                        label='batch2_readonly')
+                        label='g_batch2_readonly')
                     ax.hist(g_bigbatch_readonly_, normed=True, bins=30, color='purple', alpha=0.3,
-                        label='bigbatch_readonly')
+                        label='g_bigbatch_readonly')
                     ax.hist(g_full_readonly_, normed=True, bins=30, color='blue', alpha=0.3,
                         label='full_readonly')
 
@@ -1576,6 +1617,7 @@ def main():
                         if enc_x_full_.shape[1] == 2:
                             fig, ax = plt.subplots()
                             ax.scatter(*zip(*enc_x_full_), color='gray', alpha=0.2, label='enc')
+                            ax.scatter(*zip(*enc_x_nonoise_full_), color='blue', alpha=0.2, label='enc_nonoise')
                             ax.legend()
                             ax.set_title(tag)
                             plt.savefig(os.path.join(
