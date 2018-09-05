@@ -324,7 +324,7 @@ def unnormalize(data_normed, data_raw_mean, data_raw_std):
 
 
 def prepare_dirs(load_existing):
-    log_dir = 'privacy_risk_logs/logs_{}'.format(tag)
+    log_dir = 'logs_privacy_risk/logs_{}'.format(tag)
     checkpoint_dir = os.path.join(log_dir, 'checkpoints')
     plot_dir = os.path.join(log_dir, 'plots')
     g_out_dir = os.path.join(log_dir, 'g_out')

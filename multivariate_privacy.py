@@ -18,14 +18,19 @@ sys.path.append('/home/maurice/mmd')
 import tensorflow as tf
 layers = tf.layers
 
-#from tensorflow.python.keras._impl.keras import constraints 
-# print(constraints)
-# >> /usr/local/lib/python2.7/dist-packages/tensorflow/python/keras/_impl/keras
-from local_constraints import UnitNorm, DivideByMaxNorm, ClipNorm, EdgeIntervalNorm, DivideByMaxThenMinMaxNorm
-from mmd_utils import compute_mmd, compute_kmmd, compute_cmd, compute_moments, MMD_vs_Normal_by_filter
+from scipy.spatial.distance import  pdist, cdist
 from scipy.stats import multivariate_normal, shapiro
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import math_ops
+from mmd_utils import (compute_mmd, compute_kmmd, compute_cmd,
+    compute_noncentral_noisy, compute_moments, compute_central_moments,
+    compute_kth_central_moment, MMD_vs_Normal_by_filter,
+    dp_sensitivity_to_expectation)
+from local_constraints import (UnitNorm, DivideByMaxNorm, ClipNorm,
+    EdgeIntervalNorm, DivideByMaxThenMinMaxNorm)
+#from tensorflow.python.keras._impl.keras import constraints 
+# print(constraints)
+# >> /usr/local/lib/python2.7/dist-packages/tensorflow/python/keras/_impl/keras
 
 
 # Config.
@@ -37,7 +42,7 @@ parser.add_argument('--mmd_variation', type=str, default=None,
                      choices=['mmd_to_cmd'])
 parser.add_argument('--cmd_variation', type=str, default=None,
                      choices=['minus_k_plus_1', 'minus_mmd',
-                              'prog_cmd', 'mmd_to_cmd', 'fractional'])
+                              'prog_cmd', 'mmd_to_cmd', 'noisy'])
 parser.add_argument('--ae_variation', type=str, default=None,
                      choices=['pure', 'enc_noise', 'partition_ae_data',
                               'partition_enc_enc', 'subset', 'cmd_k', 'mmd',
@@ -330,6 +335,95 @@ def load_data(data_num, percent_train):
             data_raw_mean, data_raw_std)
 
 
+def print_baseline_moment_stats(k_moments, data_num, percent_train):
+    """Compute baseline statistics on moments for data set."""
+    num_samples = 100
+    baseline_moments = np.zeros((num_samples, k_moments))
+    for i in range(num_samples):
+        d, _, d_num, _, _, d_raw_mean, d_raw_std = load_data(data_num,
+            percent_train)
+        d = d * d_raw_std + d_raw_mean
+        baseline_moments[i] = compute_moments(d, k_moments)
+    baseline_moments_means = np.mean(baseline_moments, axis=0)  # Mean.
+    baseline_moments_stds = np.std(baseline_moments, axis=0)  # Standard deviation.
+    baseline_moments_maes = np.mean(np.abs(
+        baseline_moments - baseline_moments_means), axis=0)  # Mean absolute error.
+    for j in range(k_moments):
+        print('Moment {} Mean: {:.2f}, Std: {:.2f}, MAE: {:.2f}'.format(j+1,
+            baseline_moments_means[j], baseline_moments_stds[j],
+            baseline_moments_maes[j]))
+
+
+def make_fixed_batches_and_sensitivities(data, batch_size, k_moments):
+    """Makes fixed batches for training, and gives sensitivities per moment."""
+    # Partition data into fixed batches.
+    fixed_batches = np.array(
+        [data[i:i + batch_size] for i in xrange(0, len(data), batch_size)])
+    # Within each batch, measure central moments while omitting one point. Then
+    # compute and store the sensitivities of each of the k moments.
+    fixed_batches_sensitivities = np.zeros(
+        (len(fixed_batches), k_moments), dtype=np.float32)
+    for batch_num, batch in enumerate(fixed_batches):
+        # Record central moments, one row for each omission.
+        batch_moments_without_pt_i = np.zeros(
+            (batch_size, k_moments), dtype=np.float32)
+        for i in range(batch_size):
+            batch_moments_without_pt_i[i] = \
+                compute_moments(np.delete(batch, i, axis=0), k_moments)
+                #compute_central_moments(np.delete(batch, i, axis=0), k_moments)
+        # Store sensitivities for the k_moments of this batch.
+        fixed_batches_sensitivities[batch_num] = (
+            np.max(batch_moments_without_pt_i, axis=0) - 
+            np.min(batch_moments_without_pt_i, axis=0))
+    return fixed_batches, fixed_batches_sensitivities
+
+
+#def make_fixed_batches_v2(data, batch_size, k_moments):
+#    """Makes fixed batches for training, and gives sensitivities per moment."""
+#    # Partition data into fixed batches.
+#    fixed_batches = np.array(
+#        [data[i:i + batch_size] for i in xrange(0, len(data), batch_size)])
+#    # Within each batch, measure central moments while omitting one point. Then
+#    # compute and store the sensitivities of each of the k moments.
+#    fixed_batches_sensitivities = np.zeros(
+#        (len(fixed_batches), k_moments), dtype=np.float32)
+#    for batch_num, batch in enumerate(fixed_batches):
+#        # Record central moments, one row for each omission.
+#        batch_moments_without_pt_i = np.zeros((batch_size, k_moments),
+#            dtype=np.float32)
+#        # Compute only the means.
+#        for i in range(batch_size):
+#            batch_less_i = np.delete(batch, i, axis=0)
+#            batch_moments_without_pt_i[i, 0] = np.mean(batch_less_i)
+#        # Get sensitivity of means.
+#        m1_sens = (
+#            np.max(batch_moments_without_pt_i[:,0]) - 
+#            np.min(batch_moments_without_pt_i[:,0]))
+#        fixed_batches_sensitivities[batch_num, 0] = m1_sens
+#        # Compute noisy mean.
+#        q1_noisy = np.mean(batch) + np.random.laplace(loc=0, scale=m1_sens/1.)
+#
+#        # Compute higher-order query responses using the noisy mean response.
+#        for k in range(2, k_moments + 1):
+#            for i in range(batch_size):
+#                batch_less_i = np.delete(batch, i, axis=0)
+#                batch_moments_without_pt_i[i, 0] = np.mean(batch_less_i)
+#
+#        pdb.set_trace()
+#
+#        #for i in range(batch_size):
+#        #    batch_less_i = np.delete(batch, i, axis=0)
+#        #    for j in range(2, k_moments + 1):
+#        #        d_moment_i = np.mean(np.power(d - d_mean, i), axis=0)
+#        #    batch_moments_without_pt_i[i, 0] = np.mean(batch_less_i)
+#
+#        # Store sensitivities for the k_moments of this batch.
+#        fixed_batches_sensitivities[batch_num] = (
+#            np.max(batch_moments_without_pt_i, axis=0) - 
+#            np.min(batch_moments_without_pt_i, axis=0))
+#    return fixed_batches, fixed_batches_sensitivities
+
+
 def unnormalize(data_normed, data_raw_mean, data_raw_std):
     return data_normed * data_raw_std + data_raw_mean
 
@@ -463,8 +557,6 @@ def build_model_ae_base(batch_size, data_num, data_test_num, gen_num, out_dim,
         avg_nearest_neighbor_distance(x_precompute, x_test_precompute)
 
     # Regular training placeholders.
-    #x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
-    #x_readonly = tf.placeholder(tf.float32, [data_num, out_dim], name='x_readonly')
     x = tf.placeholder(tf.float32, [batch_size, out_dim], name='x')
     x_readonly = tf.placeholder(tf.float32, [None, out_dim], name='x_readonly')
     x_test = tf.placeholder(tf.float32, [batch_size, out_dim], name='x_test')
@@ -971,7 +1063,7 @@ def build_model_kmmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
 
 def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
-        z_dim, cmd_a, cmd_b):
+        z_dim, cmd_a, cmd_b, fixed_batches_sensitivities):
     # Placeholders to precompute avg distance from data_test to data.
     x_precompute = tf.placeholder(tf.float32, [data_test_num, out_dim],
         name='x_precompute')
@@ -1025,10 +1117,12 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         # Train with MMD, and switch to CMD at inidcator step.
         cmd_adjusted = (1 - mmd_to_cmd_indicator) * mmd + \
             (mmd_to_cmd_indicator) * cmd_k
-    elif cmd_variation == 'fractional':
-        # CMD with finer grid of moments up to k.
-        cmd_adjusted = compute_cmd(x, g, k_moments=k_moments, use_tf=True,
-            cmd_a=cmd_a, cmd_b=cmd_b, fractional_step=0.5)  
+    elif cmd_variation == 'noisy':
+        # CMD with noise on empirical data moments.
+        batch_id = tf.placeholder(tf.int32, shape=(), name='batch_id')
+        cmd_adjusted = compute_noncentral_noisy(x, g, k_moments=k_moments, use_tf=True,
+            cmd_a=cmd_a, cmd_b=cmd_b, batch_id=batch_id,
+            fixed_batches_sensitivities=fixed_batches_sensitivities)
     else:
         cmd_adjusted = cmd_k  # Normal CMD loss.
 
@@ -1070,7 +1164,8 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     return (x, z, z_readonly, x_test, x_precompute, x_test_precompute,
             avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
             distances_xt_xp, prog_cmd_coefs, mmd_to_cmd_indicator, cmd_k_terms,
-            g, g_readonly, mmd, cmd, loss1, loss2, lr_update, g_optim, summary_op)
+            g, g_readonly, mmd, cmd, loss1, loss2, lr_update, g_optim,
+            summary_op, batch_id)
 
 
 def main():
@@ -1100,21 +1195,12 @@ def main():
     nmd_zero_indices = np.argwhere(np.array(normed_moments_data) < 0.1) 
 
     # Compute baseline statistics on moments for data set.
-    num_samples = 100
-    baseline_moments = np.zeros((num_samples, k_moments))
-    for i in range(num_samples):
-        d, _, d_num, _, _, d_raw_mean, d_raw_std = load_data(data_num,
-            percent_train)
-        d = d * d_raw_std + d_raw_mean
-        baseline_moments[i] = compute_moments(d, k_moments)
-    baseline_moments_means = np.mean(baseline_moments, axis=0)  # Mean.
-    baseline_moments_stds = np.std(baseline_moments, axis=0)  # Standard deviation.
-    baseline_moments_maes = np.mean(np.abs(
-        baseline_moments - baseline_moments_means), axis=0)  # Mean absolute error.
-    for j in range(k_moments):
-        print('Moment {} Mean: {:.2f}, Std: {:.2f}, MAE: {:.2f}'.format(j+1,
-            baseline_moments_means[j], baseline_moments_stds[j],
-            baseline_moments_maes[j]))
+    print_baseline_moment_stats(k_moments, data_num, percent_train)
+
+    # Compute sensitivities for moments, based on fixed batches.
+    (fixed_batches,
+     fixed_batches_sensitivities) = make_fixed_batches_and_sensitivities(
+         data, batch_size, k_moments)
 
     # Get compact interval bounds for CMD computations.
     cmd_a = np.min(data)
@@ -1186,10 +1272,11 @@ def main():
         (x, z, z_readonly, x_test, x_precompute, x_test_precompute,
          avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed,
          distances_xt_xp, prog_cmd_coefs, mmd_to_cmd_indicator, cmd_k_terms, g,
-         g_readonly, mmd, cmd, loss1, loss2, lr_update, g_optim, summary_op) = \
+         g_readonly, mmd, cmd, loss1, loss2, lr_update, g_optim, summary_op,
+         batch_id) = \
              build_model_cmd_gan(
                  batch_size, gen_num, data_num, data_test_num, out_dim, z_dim,
-                 cmd_a, cmd_b)
+                 cmd_a, cmd_b, fixed_batches_sensitivities)
 
     ###########################################################################
     # Start session.
@@ -1216,9 +1303,8 @@ def main():
         # Once, compute average distance from heldout data to training data.
         avg_dist_x_to_x_test_precomputed_, _ = sess.run(
             [avg_dist_x_to_x_test_precomputed, distances_xt_xp],
-            feed_dict=
-                {x_precompute: data[:len(data_test)],
-                 x_test_precompute: data_test})
+            {x_precompute: data[:len(data_test)],
+             x_test_precompute: data_test})
 
         # Containers to hold empirical and relative errors of moments.
         empirical_moments_gens = np.zeros(
@@ -1232,75 +1318,109 @@ def main():
         # train()
         start_time = time()
         for step in range(load_step, max_step):
+
             # Set up inputs for all models.
-            random_batch_data = np.array(
-                [data[d] for d in np.random.choice(len(data), batch_size)])
+            # OPTION 1: RANDOM BATCH SELECTION.
+            # OPTION 2: FIXED BATCH SELECTION.
+            batch_selection_option = 2
+            if batch_selection_option == 1:
+                random_batch_data = np.array(
+                    [data[d] for d in np.random.choice(len(data), batch_size)])
+                _batch_id = None 
+            elif batch_selection_option == 2:
+                _epoch, _batch_id = np.divmod(step, len(fixed_batches))
+                if _batch_id == 0:
+                    print('EPOCH {}'.format(_epoch))
+                random_batch_data = fixed_batches[_batch_id]
+            # Fetch test data and z.
             random_batch_data_test = np.array(
                 [data_test[d] for d in np.random.choice(
                     len(data_test), batch_size)])
             random_batch_z = get_random_z(gen_num, z_dim)
-            shared_feed_dict = {
-                x: random_batch_data,
-                x_test: random_batch_data_test,
-                x_readonly: data,
-                avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_}
 
-            # Do an optimization step.
-            if model_type == 'ae_base':
-                if ae_variation == 'enc_noise':
-                    #sess.run(h_weights_update, shared_feed_dict)
-                    sess.run(d_optim, shared_feed_dict)
-                else:
-                    sess.run(d_optim, shared_feed_dict)
+            ## TEST compute_cmd_noisy.
+            #b = random_batch_data
+            #def m1(arr):
+            #    return np.mean(arr, axis=0)
+            #def m2(arr):
+            #    return compute_kth_central_moment(arr, 2)
+            #print(dp_sensitivity_to_expectation(b, m1))
+            #print(dp_sensitivity_to_expectation(b, m2))
+            #pdb.set_trace()
 
-
-            elif model_type == 'mmd_gan':
+            # Update shared dict for chosen model.
+            if model_type in ['ae_base', 'mmd_gan']:
+                feed_dict = {
+                    x: random_batch_data,
+                    x_test: random_batch_data_test,
+                    x_readonly: data,
+                    avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_}
                 # Define schedule of switching from MMD to CMD.
-                if mmd_variation == 'mmd_to_cmd':
+                if model_type == 'mmd_gan' and mmd_variation == 'mmd_to_cmd':
                     if step < 50000:
                         indicator_ = 0.
                     else:
                         indicator_ = 1.
                 else:
                     indicator_ = 0.  # Stay on MMD, never switch.
-                shared_feed_dict.update(
+                feed_dict.update(
                     {z: random_batch_z,
                      mmd_to_cmd_indicator: indicator_})
-                sess.run([d_optim, g_optim], shared_feed_dict)
-
-            elif model_type in ['mmd_gan_simple', 'kmmd_gan']:
-                shared_feed_dict.update({z: random_batch_z})
-                sess.run(g_optim, shared_feed_dict)
-
             elif model_type in ['cmd_gan']:
-                # Compute coefficients for progressive CMD.
-                # TODO: Figure out what schedule of progression is best.
-                #   e.g. incremental 1, 2, ...; or perhaps evens then odds?
-                # This fades in M2 over 5k iters, M3 over 10k iters, etc.
-                phase_in_interval = 5000.
-                coefs_ = np.ones(k_moments)
-                for k in range(1, k_moments):
-                    # Recall, by position index. Even positions are odd moments.
-                    # positions: 0, 1, 2, 3, ...
-                    # moments:   1, 2, 3, 4, ...
-                    #if k % 2 == 0:
-                    #    coefs_[k] = 0.0
-                    #else:
-                    #    pass
-                    coefs_[k] = np.minimum(1., step / (k * phase_in_interval))
+                feed_dict = {
+                    x: random_batch_data,
+                    z: random_batch_z,
+                    x_test: random_batch_data_test,
+                    avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_,
+                    batch_id: _batch_id}
+                if cmd_variation == 'prog_cmd':
+                    # Compute coefficients for progressive CMD.
+                    # TODO: Figure out what schedule of progression is best.
+                    #   e.g. incremental 1, 2, ...; or perhaps evens then odds?
+                    # This fades in M2 over 5k iters, M3 over 10k iters, etc.
+                    phase_in_interval = 5000.
+                    coefs_ = np.ones(k_moments)
+                    for k in range(1, k_moments):
+                        coefs_[k] = np.minimum(1., step / (k * phase_in_interval))
+                    # Define schedule of switching from MMD to CMD.
+                    if step < 50000:
+                        indicator_ = 0.0
+                    else:
+                        indicator_ = 1.0
+                    feed_dict.update({
+                        prog_cmd_coefs: coefs_,
+                        mmd_to_cmd_indicator: indicator_})
+            elif model_type in ['mmd_gan_simple', 'kmmd_gan']:
+                feed_dict = {
+                    x: random_batch_data,
+                    x_readonly: data,
+                    z: random_batch_z,
+                    x_test: random_batch_data_test,
+                    avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_}
+            else:
+                sys.exit('Need to set up feed_dict for model type: {}'.format(
+                    model_type))
+                #feed_dict = {
+                #    x: random_batch_data,
+                #    x_readonly: data,
+                #    z: random_batch_z,
+                #    x_test: random_batch_data_test,
+                #    avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_}
 
-                # Define schedule of switching from MMD to CMD.
-                if step < 50000:
-                    indicator_ = 0.0
+            # Run optimization step.
+            if model_type == 'ae_base':
+                if ae_variation == 'enc_noise':
+                    #sess.run(h_weights_update, feed_dict)
+                    sess.run(d_optim, feed_dict)
                 else:
-                    indicator_ = 1.0
-
-                shared_feed_dict.update(
-                    {z: random_batch_z,
-                     prog_cmd_coefs: coefs_,
-                     mmd_to_cmd_indicator: indicator_})
-
-                sess.run(g_optim, shared_feed_dict)
+                    sess.run(d_optim, feed_dict)
+            elif model_type == 'mmd_gan':
+                sess.run([d_optim, g_optim], feed_dict)
+            elif model_type in ['mmd_gan_simple', 'kmmd_gan']:
+                feed_dict.update({z: random_batch_z})
+                sess.run(g_optim, feed_dict)
+            elif model_type in ['cmd_gan']:
+                sess.run(g_optim, feed_dict)
 
             # Occasionally update learning rate.
             if step % lr_update_step == lr_update_step - 1:
@@ -1319,7 +1439,7 @@ def main():
                             [ae_loss, ae_base_loss, enc_norm_loss,
                              h_weights_variance_norm, d_loss,
                              mmd, summary_op, loss1, loss2],
-                            shared_feed_dict)
+                            feed_dict)
                     print(('\nAE_BASE. Iter: {}\n  ae_loss: {:.4f}, '
                            'ae_base_loss: {:.4f}, enc_norm_loss: {:.4f}, '
                            'h_wt_var_norm: {:.4f}, d_loss: {:.4f}\n  '
@@ -1329,55 +1449,17 @@ def main():
                                enc_norm_loss_, h_weights_variance_norm_,
                                d_loss_, mmd_, loss1_, loss2_))
 
-                    batch1 = random_batch_data
-                    batch2 = np.array([data[d] for d in np.random.choice(
-                        len(data), batch_size)])
-                    batch3 = np.array([data[d] for d in np.random.choice(
-                        len(data), 10 * batch_size)])
-                    batch4 = data
-
                     # Test this step's batch.
-                    shared_feed_dict.update({x: batch1})
-                    g_batch_ = sess.run(g, shared_feed_dict)
-
-                    # Test another batch.
-                    shared_feed_dict.update({x: batch2})
-                    g_batch2_ = sess.run(g, shared_feed_dict)
-
-                    # Test batch2, on readonly node.
-                    shared_feed_dict.update({x_readonly: batch2})
-                    g_batch2_readonly_ = sess.run(g_readonly, shared_feed_dict)
-
-                    # Test another bigger batch, on readonly node.
-                    shared_feed_dict.update({x_readonly: batch3})
-                    g_bigbatch_readonly_ = sess.run(g_readonly, shared_feed_dict)
+                    feed_dict.update({x: random_batch_data})
+                    g_batch_ = sess.run(g, feed_dict)
 
                     # Test the full data.
-                    shared_feed_dict.update({x_readonly: batch4})
+                    feed_dict.update({x_readonly: data})
                     g_full_readonly_, enc_x_full_readonly_, enc_x_nonoise_full_readonly_ = \
                         sess.run(
                             [g_readonly, enc_x_readonly, enc_x_nonoise_readonly],
-                            shared_feed_dict)
+                            feed_dict)
 
-                    print('BATCH1')
-                    mm(batch1)
-                    print('BATCH2')
-                    mm(batch2)
-                    print('10x BATCH')
-                    mm(batch3)
-                    print('DATA')
-                    mm(batch4)
-
-                    print('G_BATCH1')
-                    mm(g_batch_)
-                    print('G_BATCH2')
-                    mm(g_batch2_)
-                    print('G_BATCH2_READONLY')
-                    mm(g_batch2_readonly_)
-                    print('G_BATCH3_10x_READONLY')
-                    mm(g_bigbatch_readonly_)
-                    print('G_DATA_READONLY')
-                    mm(g_full_readonly_)
                     # TODO: NEED TO ADD BACK g_readonly_.
                     g_full_ = g_full_readonly_
                     enc_x_full_ = enc_x_full_readonly_
@@ -1386,7 +1468,7 @@ def main():
                 elif model_type == 'mmd_gan':
                     d_loss_, ae_loss_, mmd_, loss1_, loss2_, summary_result = sess.run(
                         [d_loss, ae_loss, mmd, loss1, loss2, summary_op],
-                        shared_feed_dict)
+                        feed_dict)
                     print(('\nMMD_GAN. Iter: {}\n  d_loss: {:.4f}, ae_loss: {:.4f}, '
                             'mmd: {:.4f}, loss1: {:.4f}, loss2: {:.4f}').format(
                                step, d_loss_, ae_loss_, mmd_, loss1_, loss2_))
@@ -1396,17 +1478,17 @@ def main():
 
                 elif model_type == 'mmd_gan_simple':
                     mmd_, loss1_, loss2_, summary_result = sess.run(
-                        [mmd, loss1, loss2, summary_op], shared_feed_dict)
-                    g_readonly_ = sess.run(g_readonly, feed_dict={
-                        z_readonly: get_random_z(data_num, z_dim)})
+                        [mmd, loss1, loss2, summary_op], feed_dict)
+                    g_readonly_ = sess.run(
+                        g_readonly, {z_readonly: get_random_z(data_num, z_dim)})
                     print(('\nMMD_GAN_SIMPLE. Iter: {}\n  mmd: {:.4f}, loss1: {:.4f}, '
                            'loss2: {:.4f}').format(step, mmd_, loss1_, loss2_))
 
                 elif model_type == 'kmmd_gan':
                     kmmd_, mmd_, loss1_, loss2_, summary_result = sess.run(
-                        [kmmd, mmd, loss1, loss2, summary_op], shared_feed_dict)
-                    g_readonly_ = sess.run(g_readonly, feed_dict={
-                        z_readonly: get_random_z(data_num, z_dim)})
+                        [kmmd, mmd, loss1, loss2, summary_op], feed_dict)
+                    g_readonly_ = sess.run(
+                        g_readonly, {z_readonly: get_random_z(data_num, z_dim)})
                     print(('\nKMMD_GAN. Iter: {}\n  kmmd: {:.4f}, mmd: {:.4f}, '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, kmmd_, mmd_, loss1_, loss2_))
@@ -1415,9 +1497,11 @@ def main():
                     cmd_, cmd_k_terms_, mmd_, loss1_, loss2_, summary_result = \
                         sess.run(
                             [cmd, cmd_k_terms, mmd, loss1, loss2, summary_op],
-                            shared_feed_dict)
-                    g_readonly_ = sess.run(g_readonly, feed_dict={
-                        z_readonly: get_random_z(data_num, z_dim)})
+                            feed_dict)
+                    g_readonly_ = sess.run(
+                        g_readonly, {z_readonly: get_random_z(data_num, z_dim)})
+                    g_batch_ = g_readonly_[np.random.randint(0, data_num, batch_size)]
+                    g_full_ = g_readonly_
                     print(('CMD_GAN. Iter: {}\n  cmd: {:.4f}, mmd: {:.4f} '
                            'loss1: {:.4f}, loss2: {:.4f}').format(
                                step, cmd_, mmd_, loss1_, loss2_))
@@ -1509,14 +1593,8 @@ def main():
                     #    label='test')
                     ax.hist(g_batch_, normed=True, bins=30, color='orange', alpha=0.3,
                         label='g_batch')
-                    ax.hist(g_batch2_, normed=True, bins=30, color='yellow', alpha=0.3,
-                        label='g_batch2')
-                    ax.hist(g_batch2_readonly_, normed=True, bins=30, color='black', alpha=0.3,
-                        label='g_batch2_readonly')
-                    ax.hist(g_bigbatch_readonly_, normed=True, bins=30, color='purple', alpha=0.3,
-                        label='g_bigbatch_readonly')
-                    ax.hist(g_full_readonly_, normed=True, bins=30, color='blue', alpha=0.3,
-                        label='full_readonly')
+                    ax.hist(g_full_, normed=True, bins=30, color='blue', alpha=0.2,
+                        label='g_full_readonly')
 
                     plt.legend()
                     plt.savefig(os.path.join(plot_dir, '{}.png'.format(step)))
