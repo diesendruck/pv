@@ -45,6 +45,7 @@ parser.add_argument('--cmd_variation', type=str, default=None,
                     choices=['dp_sgd', 'onetime_noisy', 'onetime_noisy_joint'])
 parser.add_argument('--default_gradient_l2norm_bound', type=float, default=4.0)
 parser.add_argument('--laplace_eps', type=float, default=2.0)
+parser.add_argument('--sgd_target_eps', type=str, default='0.125,0.25,0.5,1,2,4,8')
 parser.add_argument('--sgd_eps', type=float, default=1.0)
 parser.add_argument('--sgd_delta', type=float, default=1e-5)
 parser.add_argument('--sgd_sigma', type=float, default=4.0)
@@ -77,6 +78,7 @@ model_type = args.model_type
 cmd_variation = args.cmd_variation
 default_gradient_l2norm_bound = args.default_gradient_l2norm_bound
 laplace_eps = args.laplace_eps
+sgd_target_eps = [float(s) for s in args.sgd_target_eps.split(',')]
 sgd_eps = args.sgd_eps
 sgd_delta = args.sgd_delta
 sgd_sigma = args.sgd_sigma
@@ -789,10 +791,8 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
     # Placeholders to precompute avg distance from data_test to data.
     x_precompute = tf.placeholder(
         tf.float32, [data_test_num, out_dim], name='x_precompute')
-
     x_test_precompute = tf.placeholder(
         tf.float32, [data_test_num, out_dim], name='x_test_precompute')
-
     avg_dist_x_to_x_test_precomputed, distances_xt_xp = \
         avg_nearest_neighbor_distance(x_precompute, x_test_precompute)
 
@@ -805,10 +805,8 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
 
     avg_dist_x_to_x_test = tf.placeholder(
         tf.float32, shape=(), name='avg_dist_x_to_x_test')
-
     prog_cmd_coefs = tf.placeholder(
         tf.float32, shape=(k_moments), name='prog_cmd_coefs')
-
     mmd_to_cmd_indicator = tf.placeholder(
         tf.float32, shape=(), name='mmd_to_cmd_indicator')
 
@@ -903,8 +901,12 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         # entropy loss across batch, claiming the "actual cost is the average
         # across the examples". Here, the CMD is already an expectation over
         # the samples, so it's unclear whether it should be scaled.
+        # NOTE: Using Noncentral Moment Discrepancy.
+        # TODO: Should the loss be scaled down by batch_size?
+        g_loss = nmd_k  
+
+        # Report regular CMD_K.
         cmd = cmd_k
-        g_loss = nmd_k  # NOTE: Using Noncentral Moment Discrepancy.
 
         # Define effective training size, given fixed batches.
         num_training = batch_size * len(fixed_batches_moment_sensitivities)
@@ -916,6 +918,7 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
         sigma = sgd_sigma
         
         # Instantiate the sanitizer.
+        # TODO: Should the bound be scaled down by batch size?
         gaussian_sanitizer = AmortizedGaussianSanitizer(
             priv_accountant,
             [default_gradient_l2norm_bound / batch_size, True])  # / batch_size?
@@ -994,7 +997,7 @@ def build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num, out_dim,
             distances_xt_xp, prog_cmd_coefs, mmd_to_cmd_indicator, cmd_k_terms,
             g, g_readonly, mmd, cmd, loss1, loss2, lr_update, lr, g_optim,
             summary_op, batch_id, fbo_noisy_moments, fbo_noisy_jmoments,
-            noisy_quantiles, eps, delta)
+            noisy_quantiles, eps, delta, priv_accountant)
 
 
 def main():
@@ -1041,7 +1044,7 @@ def main():
                len(data), batch_size, len(fixed_batches),
                batch_size * len(fixed_batches)))
 
-    # ADD ONETIME noise to moment in each batch, according to 
+    # Add onetime noise to MOMENT in each batch, according to 
     # fixed_batches_moment_sensitivities.
     allocation = [1] * k_moments
     fixed_batches_onetime_noisy_moments = \
@@ -1049,7 +1052,7 @@ def main():
             fixed_batches, fixed_batches_moment_sensitivities, k_moments,
             laplace_eps, allocation=allocation)
 
-    # ADD ONETIME noise to joint moment in each batch, according to 
+    # Add onetime noise to JOINT MOMENT in each batch, according to 
     # fixed_batches_jmoment_sensitivities.
     allocation = [1] * k_moments
     fixed_batches_onetime_noisy_jmoments = \
@@ -1062,9 +1065,8 @@ def main():
             len(fixed_batches_onetime_noisy_jmoments.shape) == 3), (
                 'fbo inputs must be 3d tensors')
 
-    # ADD ONETIME noise to quantiles in each batch, according to 
+    # Add onetime noise to quantiles in each batch, according to 
     # quantile_sensitivities.
-    # TODO: do this.
     onetime_noisy_quantiles = \
         make_noisy_quantiles(
             global_quantile_values,
@@ -1073,9 +1075,6 @@ def main():
 
 
     # Get compact interval bounds for CMD computations.
-    #cmd_a = np.min(data, axis=0)
-    #cmd_b = np.max(data, axis=0)
-    #print 'cmd_span_const: {:.2f}'.format(1.0 / (np.abs(cmd_b - cmd_a)))
     data_raw = data * data_raw_std + data_raw_mean
     cmd_a_raw = np.min(data_raw)
     cmd_b_raw = np.max(data_raw)
@@ -1108,14 +1107,16 @@ def main():
      avg_dist_x_to_x_test, avg_dist_x_to_x_test_precomputed, distances_xt_xp,
      prog_cmd_coefs, mmd_to_cmd_indicator, cmd_k_terms, g, g_readonly, mmd, cmd,
      loss1, loss2, lr_update, lr, g_optim, summary_op, batch_id,
-     fbo_noisy_moments, fbo_noisy_jmoments, noisy_quantiles, eps, delta) = \
+     fbo_noisy_moments, fbo_noisy_jmoments, noisy_quantiles, eps, delta,
+     priv_accountant) = \
          build_model_cmd_gan(batch_size, gen_num, data_num, data_test_num,
                              out_dim, z_dim, cmd_span_const,
                              fixed_batches_moment_sensitivities,
                              quantile_sensitivities, bounds=[cmd_a, cmd_b])
 
-    ###########################################################################
+    ################
     # Start session.
+    ################
     init_op = tf.global_variables_initializer()
     gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
     sess_config = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)
@@ -1157,8 +1158,9 @@ def main():
         reom = relative_error_of_moments
 
 
-        #######################################################################
+        #########
         # train()
+        #########
         start_time = time()
         for step in range(load_step, max_step):
 
@@ -1208,7 +1210,7 @@ def main():
                     avg_dist_x_to_x_test: avg_dist_x_to_x_test_precomputed_}
 
 
-            # RUN OPTIMIZATION STEP.
+            # Run optimization step.
             sess.run(g_optim, feed_dict)
 
             # Occasionally update learning rate.
@@ -1216,10 +1218,20 @@ def main():
                 _, lr_ = sess.run([lr_update, lr])
                 print('Updated learning rate to {}'.format(lr_))
 
-            ###################################################################
+            ###########
             # logging()
+            ###########
             # Occasionally log/plot results.
             if step % log_step == 0 and step > 0:
+                print('\nIter: {}'.format(step))
+
+                # Report privacy loss.
+                spent_eps_deltas = priv_accountant.get_privacy_spent(
+                    sess, target_eps=sgd_target_eps)
+                for spent_eps, spent_delta in spent_eps_deltas:
+                    print('  spent privacy: eps {:.4f} delta {:.5g}'.format(
+                          spent_eps, spent_delta))
+
                 # Read off from graph.
                 cmd_, cmd_k_terms_, mmd_, loss1_, loss2_, summary_result = \
                     sess.run(
@@ -1230,11 +1242,12 @@ def main():
                     {z_readonly: get_random_z(data_num, z_dim, for_training=False)})
                 g_batch_ = g_readonly_[np.random.randint(0, data_num, batch_size)]
                 g_full_ = g_readonly_
-                print(('CMD_GAN. Iter: {}\n  cmd: {:.4f}, mmd: {:.4f} '
+                print(('  cmd: {:.4f}, mmd: {:.4f} '
                        'loss1: {:.4f}, loss2: {:.4f}').format(
-                           step, cmd_, mmd_, loss1_, loss2_))
+                           cmd_, mmd_, loss1_, loss2_))
 
-                # TEST joint moment discrepancy.
+
+                # Test joint moment discrepancy.
                 md_batch = compute_noncentral_moment_discrepancy(
                     random_batch_data, g_batch_, k_moments=k_moments,
                     cmd_span_const=cmd_span_const, batch_id=_batch_id,
@@ -1244,15 +1257,13 @@ def main():
                     cmd_span_const=cmd_span_const, batch_id=_batch_id,
                     fbo_noisy_moments=fixed_batches_onetime_noisy_moments,
                     fbo_noisy_jmoments=fixed_batches_onetime_noisy_jmoments)
-                print('MD_batch: {:.4f}'.format(md_batch))
-                print('JMD_batch: {:.4f}'.format(jmd_batch))
+                print('  MD_batch: {:.4f}'.format(md_batch))
+                print('  JMD_batch: {:.4f}'.format(jmd_batch))
 
-
-                # TODO: DIAGNOSE NaNs.
+                # Diagnose NaNs.
                 if np.isnan(mmd_):
                     pdb.set_trace()
 
-                ###############################################################
                 # Unormalize data and simulations for all logs and plots.
                 g_batch_unnormed = unnormalize(
                     g_batch_, data_raw_mean, data_raw_std)
@@ -1283,7 +1294,6 @@ def main():
                      'misc/sens_minus_fpr': sens_minus_fpr,
                      'misc/precision': precision})
 
-                ###############################################################
                 # Save checkpoint.
                 saver.save(
                     sess,
@@ -1304,24 +1314,20 @@ def main():
                     m, s = divmod(total_est, 60)
                     h, m = divmod(m, 60)
                     total_est_str = '{:.0f}:{:02.0f}:{:02.0f}'.format(h, m, s)
-                    print ('  Time (s): {:.2f}, time/iter: {:.4f},'
+                    print ('\n  Time (s): {:.2f}, time/iter: {:.4f},'
                            ' Total est.: {}').format(
                                elapsed_time, time_per_iter, total_est_str)
 
-                    print '  Save tag: {}'.format(save_tag)
+                    print '  Save tag: {}\n'.format(save_tag)
 
 
-                ################################################################
+                ############################
                 # PLOT data and simulations.
-
+                ############################
                 if out_dim == 1:
                     fig, ax = plt.subplots()
                     ax.hist(data, normed=True, bins=30, color='gray', alpha=0.3,
                             label='data')
-                    #ax.hist(data_test, normed=True, bins=30, color='red', alpha=0.3,
-                    #        label='test')
-                    #ax.hist(g_batch_, normed=True, bins=30, color='orange', alpha=0.3,
-                    #        label='g_batch')
                     ax.hist(g_full_, normed=True, bins=30, color='blue', alpha=0.2,
                             label='g_full_readonly')
 
@@ -1329,15 +1335,6 @@ def main():
                     plt.savefig(os.path.join(plot_dir, '{}.png'.format(step)))
                     plt.close(fig)
                 elif out_dim == 2:
-                    #fig, ax = plt.subplots()
-                    #ax.scatter(*zip(*data_unnormed), color='gray', alpha=0.2, label='data')
-                    #ax.scatter(*zip(*data_test_unnormed), color='red', alpha=0.2, label='test')
-                    #ax.scatter(*zip(*g_full_unnormed), color='green', alpha=0.2, label='sim')
-                    #ax.legend()
-                    #ax.set_title(tag)
-                    #plt.savefig(os.path.join(
-                    #    plot_dir, '{}.png'.format(step)))
-                    #plt.close(fig)
                     d_x = data_unnormed[:, 0]
                     d_y = data_unnormed[:, 1]
                     g_x = g_full_unnormed[:, 0]
@@ -1374,8 +1371,7 @@ def main():
                         plot_dir, '{}.png'.format(step)))
                     plt.close()
                     
-                
-                # PLOT moment diagnostics.
+                # Plot moment diagnostics.
                 if data_dim <= 2:
                     normed_moments_gens = compute_moments(
                         g_full_, k_moments=k_moments+1)
@@ -1385,27 +1381,28 @@ def main():
                     cmap = plt.cm.get_cmap('cool', k_moments+1)
 
                     if data_dim == 1:
-                        ###########################################################
                         # Plot empirical moments throughout training.
                         fig, (ax_data, ax_gens) = plt.subplots(2, 1)
                         for i in range(k_moments+1):
                             ax_data.axhline(y=normed_moments_data[i],
                                             label='m{}'.format(i+1), c=cmap(i))
                             ax_gens.plot(empirical_moments_gens[:step/log_step, i],
-                                         label='m{}'.format(i+1), c=cmap(i), alpha=0.8)
-                        ax_data.set_ylim(min(normed_moments_data)-0.5, max(normed_moments_data)+0.5)
+                                         label='m{}'.format(i+1), c=cmap(i),
+                                         alpha=0.8)
+                        ax_data.set_ylim(min(normed_moments_data)-0.5,
+                                         max(normed_moments_data)+0.5)
                         ax_gens.set_xlabel('Empirical moments, gens')
                         ax_data.set_xlabel('Empirical moments, data')
                         ax_gens.legend()
                         ax_data.legend()
-                        plt.suptitle('{}, empirical moments, k={}'.format(tag, k_moments))
+                        plt.suptitle('{}, empirical moments, k={}'.format(
+                            tag, k_moments))
                         plt.tight_layout()
                         plt.savefig(os.path.join(
                             plot_dir, 'empirical_moments.png'))
                         plt.close(fig)
 
-
-                    # FIGURE OUT TO PLOT RELATIVE ERROR
+                    # Plot relative error of moments.
                     relative_error_of_moments_test = (
                         norm(np.array(normed_moments_data_test) -
                              np.array(normed_moments_data), axis=1) /
@@ -1420,9 +1417,9 @@ def main():
                     reom[step / log_step] = relative_error_of_moments_gens
 
                     if data_dim <= 2:
-                        print('    RELATIVE_TEST: {}'.format(list(
+                        print('  RELATIVE_TEST: {}'.format(list(
                             np.round(relative_error_of_moments_test, 2))))
-                        print('    RELATIVE_GENS: {}'.format(list(
+                        print('  RELATIVE_GENS: {}'.format(list(
                             np.round(relative_error_of_moments_gens, 2))))
 
                     # For plotting, zero-out moments that are likely zero, so
