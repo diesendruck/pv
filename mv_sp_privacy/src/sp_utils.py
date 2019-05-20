@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import sys
 import pdb
 
+from scipy.stats import multivariate_normal
+
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
                        Y_INIT_OPTION='radial'):
@@ -122,7 +124,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                         print('  [*] Overall it/s: {:.4f}'.format(
                             (time.time() - start_time) / it))
 
-                    plt.scatter(data[:, 0], data[:, 1], c='black', s=64,
+                    plt.scatter(data[:, 0], data[:, 1], c='gray', s=64,
                                 alpha=0.3, label='data')
                     plt.scatter(sp_[:, 0], sp_[:, 1], s=32, c='limegreen',
                                 label='sp')
@@ -158,7 +160,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
 
             # Plot occasionally.
             if data.shape[1] == 2 and it in save_iter and it > 0:
-                plt.scatter(data[:, 0], data[:, 1], c='black', s=64, alpha=0.3,
+                plt.scatter(data[:, 0], data[:, 1], c='gray', s=64, alpha=0.3,
                             label='data')
                 plt.scatter(gen[:, 0], gen[:, 1], s=32, c='limegreen',
                             label='sp')
@@ -309,8 +311,11 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       y_tildes: NumPy array, sampled support point sets.
       energies: NumPy array, energies associated with sampled sets.
     """
-
-    # Sample energy distance.
+    sensitivity_string = ('\nPr(e) ~ Exp(2U/a) = a / (2U) * exp(- a / (2U) * e)'
+                          ' = Exp(2 * {:.4f} / {}) = Exp({:.4f})\n'.format(
+                              energy_sensitivity, alpha,
+                              2 * energy_sensitivity / alpha))
+    print(sensitivity_string)
 
     # Sample support points.
     if method == 'diffusion':
@@ -324,8 +329,10 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 
         for i in range(num_y_tildes):
             # TODO: Must be {larger than optimal energy distance, positive}.
-            e_tilde = np.abs(np.random.laplace(
-                scale=2. * energy_sensitivity / alpha))
+            # e_tilde = np.abs(np.random.laplace(
+            #     scale=2. * energy_sensitivity / alpha))
+            e_tilde = np.random.exponential(
+                scale=2. * energy_sensitivity / alpha)
 
             y_tilde = y_opt.copy()
             energy_y_y_tilde = 0.
@@ -349,7 +356,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                        'energy(y,y~): {:5.6f}, error%: {:.6f}').format(
                     count, e_opt, e_tilde, energy_y_y_tilde,
                     (energy_y_y_tilde - e_tilde) / e_tilde))
-                plt.scatter(x[:, 0], x[:, 1], c='black', alpha=0.3,
+                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
                             label='data')
                 plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
                             label='sp(data)')
@@ -432,7 +439,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 
             if i % int(chain_length / 4) == 0:
                 # Plot the points.
-                plt.scatter(x[:, 0], x[:, 1], c='black', alpha=0.3,
+                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
                             label='data')
                 plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
                             label='sp(data)')
@@ -480,3 +487,59 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         print('Method not recognized.')
 
     return y_tildes, energies
+
+
+def mixture_model_likelihood(x, mus, weights, sigma_data):
+    """Computes likelihood of data set, given cluster centers and weights.
+
+    Args:
+      x: NumPy array of raw, full data set.
+      mus: NumPy array of cluster centers.
+      weights: NumPy array of cluster weights.
+      sigma_data: Scalar bandwidth used to generate data.
+
+    Returns:
+      density: Scalar likelihood value for given data set.
+    """
+    dim = x.shape[1]
+    center_dists = [
+        multivariate_normal(mu, sigma_data * np.eye(dim)) for mu in mus]
+
+    def pt_likelihood(pt):
+        # Summation of weighted gaussians.
+        return sum(
+            [weight * dist.pdf(pt) for weight, dist in zip(weights,
+                                                           center_dists)])
+
+    pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
+
+    return pts_likelihood
+
+
+def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
+                                 STEP_SIZE, ALPHA, BANDWIDTH, SAMPLE_SIZE,
+                                 mus=None, weights=None, sigma_data=None):
+    """Samples one full-size data set, given a bandwidth.
+
+    Args:
+      ... args from earlier ...
+
+    Return:
+       y_tilde: NumPy array of sampled, private support points.
+       full_sample: NumPy array of kernel density expansion of y_tilde.
+    """
+
+    ys, es = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
+                                'diffusion', STEP_SIZE, 1, alpha=ALPHA)
+    y_tilde = ys[0]
+    energy_y_y_tilde = es[0]
+
+    # Sample from mixture model centered on noisy support points.
+    choices = np.random.choice(range(len(y_tilde)), size=SAMPLE_SIZE)
+    y_tilde_upsampled = y_tilde[choices]
+    y_tilde_upsampled_with_noise = (
+        y_tilde_upsampled + np.random.normal(0, BANDWIDTH,
+                                             size=(SAMPLE_SIZE, x.shape[1])))
+    full_sample = y_tilde_upsampled_with_noise
+
+    return y_tilde, y_tilde_upsampled, full_sample, energy_y_y_tilde
