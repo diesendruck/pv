@@ -502,14 +502,14 @@ def mixture_model_likelihood(x, mus, weights, sigma_data):
       density: Scalar likelihood value for given data set.
     """
     dim = x.shape[1]
-    center_dists = [
+    gaussians = [
         multivariate_normal(mu, sigma_data * np.eye(dim)) for mu in mus]
 
     def pt_likelihood(pt):
         # Summation of weighted gaussians.
         return sum(
-            [weight * dist.pdf(pt) for weight, dist in zip(weights,
-                                                           center_dists)])
+            [weight * gauss.pdf(pt) for weight, gauss in zip(weights,
+                                                             gaussians)])
 
     pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
 
