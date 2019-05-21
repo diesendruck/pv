@@ -337,7 +337,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             y_tilde = y_opt.copy()
             energy_y_y_tilde = 0.
             count = 0
-            max_count = 1e4
+            max_count = 1e5
 
             while energy_y_y_tilde < e_tilde and count <= max_count:
                 y_tilde += np.random.normal(0, step_size, size=y_tilde.shape)
