@@ -312,7 +312,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       energies: NumPy array, energies associated with sampled sets.
     """
     sensitivity_string = ('\nPr(e) ~ Exp(2U/a) = a / (2U) * exp(- a / (2U) * e)'
-                          ' = Exp(2 * {:.4f} / {}) = Exp({:.4f})\n'.format(
+                          ' = Exp(2 * {:.4f} / {:.3f}) = Exp({:.4f})\n'.format(
                               energy_sensitivity, alpha,
                               2 * energy_sensitivity / alpha))
     print(sensitivity_string)
@@ -489,7 +489,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
     return y_tildes, energies
 
 
-def mixture_model_likelihood(x, mus, weights, sigma_data):
+def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
     """Computes likelihood of data set, given cluster centers and weights.
 
     Args:
@@ -514,6 +514,39 @@ def mixture_model_likelihood(x, mus, weights, sigma_data):
     pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
 
     return pts_likelihood
+
+
+def mixture_model_likelihood(x, y_tilde, sigma, do_log=True):
+    """Computes likelihood of data set, given cluster centers and weights.
+
+    Args:
+      x: NumPy array of raw, full data set.
+      y_tilde: NumPy array of cluster/kernel centers.
+      sigma: Scalar bandwidth of kernels.
+      do_log: Boolean, choose to do computations in log scale.
+
+    Returns:
+      density: Scalar likelihood value for given data set.
+    """
+    dim = x.shape[1]
+    gaussians = [
+        multivariate_normal(y, sigma * np.eye(dim)) for y in y_tilde]
+
+    def pt_likelihood(pt):
+        # Summation of weighted gaussians.
+        return sum([gauss.pdf(pt) for gauss in gaussians])
+
+    if do_log:
+        pts_likelihood = sum([np.log(pt_likelihood(pt)) for pt in x])
+    else:
+        pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
+    
+    if pts_likelihood == np.Inf:
+        pdb.set_trace()
+
+    
+    return pts_likelihood, do_log
+
 
 
 def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
