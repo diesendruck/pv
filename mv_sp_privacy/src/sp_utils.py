@@ -516,13 +516,13 @@ def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
     return pts_likelihood
 
 
-def mixture_model_likelihood(x, y_tilde, sigma, do_log=True):
+def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
     """Computes likelihood of data set, given cluster centers and weights.
 
     Args:
       x: NumPy array of raw, full data set.
       y_tilde: NumPy array of cluster/kernel centers.
-      sigma: Scalar bandwidth of kernels.
+      bandwidth: Scalar bandwidth of kernels.
       do_log: Boolean, choose to do computations in log scale.
 
     Returns:
@@ -530,23 +530,21 @@ def mixture_model_likelihood(x, y_tilde, sigma, do_log=True):
     """
     dim = x.shape[1]
     gaussians = [
-        multivariate_normal(y, sigma * np.eye(dim)) for y in y_tilde]
+        multivariate_normal(y, bandwidth * np.eye(dim)) for y in y_tilde]
 
     def pt_likelihood(pt):
         # Summation of weighted gaussians.
-        return sum([gauss.pdf(pt) for gauss in gaussians])
+        return 1. / len(gaussians) * sum([gauss.pdf(pt) for gauss in gaussians])
 
     if do_log:
         pts_likelihood = sum([np.log(pt_likelihood(pt)) for pt in x])
     else:
         pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
-    
+
     if pts_likelihood == np.Inf:
         pdb.set_trace()
 
-    
     return pts_likelihood, do_log
-
 
 
 def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,

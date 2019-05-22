@@ -23,7 +23,7 @@ def generate_data_mixture_of_Gaussians(N_private, D):
 
 def generate_data_mixture_of_Gaussians_01(N_private, D):
     C = 10
-    sigma_data = 0.035
+    sigma_data = 0.02
     centers_low = 0 + 4. * sigma_data
     centers_high = 1 - 4. * sigma_data
     mus = np.random.uniform(low=centers_low, high=centers_high, size=(C, D))
