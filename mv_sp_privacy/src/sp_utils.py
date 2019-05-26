@@ -9,7 +9,11 @@ from scipy.stats import multivariate_normal
 
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
-                       Y_INIT_OPTION='radial'):
+                       Y_INIT_OPTION='radial', clip=True, do_weights=False,
+                       plot=True):
+    print('is_tf: {}, y_init: {}, clip: {}, weights: {}'.format(
+        is_tf, Y_INIT_OPTION, clip, do_weights))
+    
     # Initialize generated particles for both sets (y and y_).
     d = x.shape[1]
     offset = 0.1
@@ -24,7 +28,8 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
         y += np.random.normal(0, 0.005, size=y.shape)
 
     elif Y_INIT_OPTION == 'random':
-        y = np.random.uniform(offset, 1 - offset, size=(num_support, d))
+        #y = np.random.uniform(offset, 1 - offset, size=(num_support, d))
+        y = np.random.uniform(np.min(x), np.max(x), size=(num_support, d))
 
     elif Y_INIT_OPTION == 'radial':
         positions = np.linspace(0,
@@ -37,7 +42,11 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
     # Optimize particles for each dataset (x0 and x1).
     y_opt, e_opt = optimize_support_points(x, y, max_iter=max_iter,
                                            learning_rate=lr, is_tf=is_tf,
-                                           save_iter=[max_iter - 1])
+                                           save_iter=[max_iter - 1],
+                                           #save_iter=[5, 10, 50, 100, max_iter - 1],
+                                           clip=clip,
+                                           do_weights=do_weights,
+                                           plot=plot)
 
     # Get last updated set as support points.
     sp = y_opt[-1]
@@ -46,37 +55,50 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
 
 def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
-                            is_tf=False, energy_power=2., save_iter=[100]):
+                            is_tf=False, energy_power=2., save_iter=[100],
+                            clip=False, do_weights=None, plot=True):
     """Runs TensorFlow optimization, n times through proposal points.
     Args:
       data: ND numpy array of any length, e.g. (100, dim).
       gen: ND numpy array of any length, e.g. (10, dim).
       max_iter: Scalar, number of times to loop through updates for all vars.
       learning_rate: Scalar, amount to move point with each gradient update.
-      is_tf: Boolean. Chooses TensorFlow optimization.
+      is_tf: Boolean, chooses TensorFlow optimization.
+      clip: Boolean, chooses to clip SP to bounded range [0, 1].
+      do_weights: Boolean, chooses to use Exponential random weight for 
+        each data point.
 
     Returns:
       y_opt: (max_iter,N,D)-array. Trace of generated proposal points.
       e_opt: Float, energy between data and last iteration of y_out.
     """
+    
+    if do_weights:
+        # Create (M,1) NumPy array with Exponential random weight for each data point.
+        exp_weights = np.random.exponential(scale=1,
+                                            size=(data.shape[0], 1)).astype(np.float32)
+        #exp_weights /= np.sum(exp_weights)
+        #assert np.abs(np.sum(exp_weights) - 1) < 1e-5, 'exponential weights must sum to one'
+    else:
+        exp_weights = None
 
+    # Set up TensorFlow optimization.
     if is_tf:
         print('\n  [*] Using TensorFlow optimization.')
+        
+        # Set up container for results.
         y_out = np.zeros((max_iter, gen.shape[0], gen.shape[1]))
-
+        
         # Build TensorFlow graph.
         tf.reset_default_graph()
-        tf_input_data = tf.placeholder(tf.float32, [None, data.shape[1]],
+        tf_input_data = tf.placeholder(tf.float32, [data.shape[0], data.shape[1]],
                                        name='input_data')
         tf_candidate_sp = tf.Variable(gen, name='sp', dtype=tf.float32)
 
         tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=energy_power,
-                             is_tf=True)
+                             is_tf=True, weights=exp_weights)
 
-        # tf_optim = tf.train.AdamOptimizer(learning_rate).minimize(tf_e_out)
         opt = tf.train.AdamOptimizer(learning_rate)
-        # opt = tf.train.RMSPropOptimizer(learning_rate)
-        # opt = tf.train.GradientDescentOptimizer(learning_rate)
         tf_grads, tf_variables = zip(*opt.compute_gradients(tf_e_out))
         tf_optim = opt.apply_gradients(zip(tf_grads, tf_variables))
 
@@ -93,9 +115,17 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
             start_time = time.time()
 
             for it in range(max_iter):
-                batch_size = max(100, gen.shape[0] * 10)
-                batch_data = data[np.random.choice(len(data), batch_size)]
-
+                #batch_size = max(100, gen.shape[0] * 10)
+                #batch_data = data[np.random.choice(len(data), batch_size)]
+                
+                # Do update over entire data set. [TAKES LONGER]
+                data_, sp_, e_, e_grads_, e_vars_ = sess.run(
+                    [tf_input_data, tf_candidate_sp, tf_e_out, tf_grads,
+                     tf_variables],
+                    {tf_input_data: data})
+                sess.run([tf_optim], {tf_input_data: data})
+                
+                """ Batch most of the time, then Full on save.
                 if it in save_iter:
                     # Do update over entire data set. [TAKES LONGER]
                     data_, sp_, e_, e_grads_, e_vars_ = sess.run(
@@ -109,17 +139,23 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                          tf_variables],
                         {tf_input_data: batch_data})
                     sess.run([tf_optim], {tf_input_data: batch_data})
+                """
 
                 # -------------------------------------------------------------
                 # TODO: Decide whether to clip support points to domain bounds.
-                sp_ = np.clip(sp_, 0, 1)
+                if clip:
+                    sp_ = np.clip(sp_, 0, 1)
                 # -------------------------------------------------------------
 
                 # Store result in container.
                 y_out[it, :] = sp_
 
                 # Plot occasionally.
-                if data.shape[1] == 2 and it in save_iter and it > 0:
+                if (data.shape[1] == 2 and
+                    it in save_iter and
+                    it > 0 and
+                    plot == True
+                   ):
                     if it > 0:
                         print('  [*] Overall it/s: {:.4f}'.format(
                             (time.time() - start_time) / it))
@@ -130,20 +166,24 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                                 label='sp')
 
                     # Plot arrows of gradients at each point.
-                    for i, sp in enumerate(sp_):
-                        plt.arrow(sp[0], sp[1], *(-1. * e_grads_[0][i]),
-                                  color='white', head_width=0.02,
-                                  head_length=0.02, length_includes_head=False)
+                    #for i, sp in enumerate(sp_):
+                    #    plt.arrow(sp[0], sp[1], *(-1. * e_grads_[0][i]),
+                    #              color='white', head_width=0.02,
+                    #              head_length=0.02, length_includes_head=False)
 
                     plt.title('it: {}, e_out: {:.8f}'.format(it, e_))
                     plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-                    plt.xlim(0, 1)
-                    plt.ylim(0, 1)
+                    #plt.xlim(0, 1)
+                    #plt.ylim(0, 1)
                     plt.gca().set_aspect('equal', adjustable='box')
                     plt.show()
 
+                    
+    # Set up NumPy optimization.
     elif not is_tf:
         print('\n  [*] Using analytical gradient optimization.')
+        
+        # Set up container for results.
         y_out = np.zeros((max_iter, gen.shape[0], gen.shape[1]))
 
         # Run optimization steps.
@@ -153,43 +193,51 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
 
             # -----------------------------------------------------------------
             # TODO: Decide whether to clip support points to domain bounds.
-            gen = np.clip(gen, 0, 1)
+            if clip:
+                gen = np.clip(gen, 0, 1)
             # -----------------------------------------------------------------
 
             y_out[it, :] = gen
 
             # Plot occasionally.
-            if data.shape[1] == 2 and it in save_iter and it > 0:
+            if (data.shape[1] == 2 and
+                it in save_iter and
+                it > 0 and
+                plot == True
+               ):
                 plt.scatter(data[:, 0], data[:, 1], c='gray', s=64, alpha=0.3,
                             label='data')
                 plt.scatter(gen[:, 0], gen[:, 1], s=32, c='limegreen',
                             label='sp')
 
                 # Plot arrows of gradients at each point.
-                for i, sp in enumerate(gen):
-                    plt.arrow(sp[0], sp[1], *(-1. * e_grads[i]),
-                              color='white', head_width=0.02,
-                              head_length=0.02, length_includes_head=False)
+                #for i, sp in enumerate(gen):
+                #    plt.arrow(sp[0], sp[1], *(-1. * e_grads[i]),
+                #              color='white', head_width=0.02,
+                #              head_length=0.02, length_includes_head=False)
 
                 plt.title('it: {}, e_out: {:.8f}'.format(it, e_))
                 plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-                plt.xlim(0, 1)
-                plt.ylim(0, 1)
+                #plt.xlim(0, 1)
+                #plt.ylim(0, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
                 plt.show()
 
     return y_out, e_
 
 
-def energy(data, gen, power=1., is_tf=False):
+def energy(data, gen, power=1., is_tf=False, weights=None):
     """Computes abbreviated energy statistic between two point sets.
 
     The smaller the value, the closer the sets.
+    
     Args:
-      data: ND numpy array of any length, e.g. (1000, 2).
-      gen: ND numpy array of any length, e.g. (10, 2).
+      data: ND NumPy array of any length, e.g. (1000, 2).
+      gen: ND NumPy array of any length, e.g. (10, 2).
       power: Exponent in distance metric. Must be >= 1.
       is_tf: Boolean. Selects for TensorFlow functions.
+      weights: (M,1) NumPy array with random weight for each data point.
+    
     Returns:
       e: Scalar, the energy between the sets.
       gradients_e: Numpy array of energy gradients for each proposal point.
@@ -204,7 +252,7 @@ def energy(data, gen, power=1., is_tf=False):
         dim = x.shape[1]
         data_num = len(x)
         gen_num = len(y)
-
+        
         # Compute energy.
         v = np.concatenate((x, y), 0)
         v_tiled_across = np.tile(v[:, np.newaxis, :], (1, v.shape[0], 1))
@@ -212,15 +260,30 @@ def energy(data, gen, power=1., is_tf=False):
         pairwise_difs = v_tiled_across - v_tiled_down
         K = np.linalg.norm(pairwise_difs, axis=2, ord=power)
 
-        K_xx = K[:data_num, :data_num]
-        K_yy = K[data_num:, data_num:]
+        # Build kernel matrix, and optionally multiple by data weights.
+        if weights is not None:
+            p1_weights = np.tile(weights, (1, data_num))
+            p2_weights = np.transpose(p1_weights)
+            K_xx = K[:data_num, :data_num] * p1_weights * p2_weights
+            K_xy = K[:data_num, data_num:] * np.tile(weights, (1, gen_num))
+        else:
+            K_xx = K[:data_num, :data_num]
+            K_yy = K[data_num:, data_num:]
         K_xy = K[:data_num, data_num:]
 
         e = (2. / gen_num / data_num * np.sum(K_xy) -
              1. / data_num / data_num * np.sum(K_xx) -
              1. / gen_num / gen_num * np.sum(K_yy))
-
+            
         # Compute energy gradients.
+        
+        
+        # TODO: COMPUTE GRADIENTS FOR WEIGHTED DATA.
+        if weights is not None:
+            print('NOTE: Gradients for weighted data not yet implemented')
+            sys.exit()
+        
+        
         # Note: Term2 assumes y in first position. For y in second position,
         #       need to multiply grad_matrix by -1.
         if power == 1:
@@ -264,29 +327,52 @@ def energy(data, gen, power=1., is_tf=False):
         v_tiled_down = tf.tile(tf.expand_dims(v, 0), [tf.shape(v)[0], 1, 1])
         pairwise_difs = v_tiled_across - v_tiled_down
 
-        # Replace diagonals (which are zeros) with small value.
         # TODO: WHY IS THIS NEEDED TO AVOID NANs?
-        # COMPUTE K WITH FILLER ON DIAG, THEN ZERO OUT DIAG.
+        # Replace diagonals (which are zeros) with small value.
+        # Compute K (norm of pairwise differences) with filler on diagonal,
+        #   then zero out diagonal.
         diag_filler = 1e-10 * tf.eye(tf.shape(pairwise_difs)[0])
         diag_filler = tf.tile(
             tf.expand_dims(diag_filler, 2),
             [1, 1, tf.shape(pairwise_difs)[2]])
         pairwise_difs = pairwise_difs + diag_filler
 
-        # Define energy over pairwise difs.
+        # Build kernel matrix using norms of pairwise difs.
         K = tf.norm(pairwise_difs, axis=2, ord=power)
+        
+        # Zero-out diagonal.
         K = tf.matrix_set_diag(K, tf.zeros(tf.shape(v)[0]))
 
-        K_xx = K[:data_num, :data_num]
-        K_yy = K[data_num:, data_num:]
-        K_xy = K[:data_num, data_num:]
+        
+        # Build kernel matrix, and optionally multiple by data weights.
+        if weights is not None:
+            weights = tf.constant(weights)
+            p1_weights = tf.tile(weights, (1, data_num))
+            p2_weights = tf.transpose(p1_weights)
+            p1p2_weights = p1_weights * p2_weights
+            p1_gen_num_weights = tf.tile(weights, (1, gen_num))
+            Kw_xx = K[:data_num, :data_num] * p1p2_weights
+            Kw_xy = K[:data_num, data_num:] * p1_gen_num_weights
+            K_yy = K[data_num:, data_num:]
+            
+            m = tf.cast(data_num, tf.float32)
+            n = tf.cast(gen_num, tf.float32)
 
-        m = tf.cast(data_num, tf.float32)
-        n = tf.cast(gen_num, tf.float32)
+            e = (2. / n / m * tf.reduce_sum(Kw_xy) -
+                 1. / m / m * tf.reduce_sum(Kw_xx) -
+                 1. / n / n * tf.reduce_sum(K_yy))
+            
+        else:
+            K_xx = K[:data_num, :data_num]
+            K_xy = K[:data_num, data_num:]
+            K_yy = K[data_num:, data_num:]
 
-        e = (2. / n / m * tf.reduce_sum(K_xy) -
-             1. / m / m * tf.reduce_sum(K_xx) -
-             1. / n / n * tf.reduce_sum(K_yy))
+            m = tf.cast(data_num, tf.float32)
+            n = tf.cast(gen_num, tf.float32)
+
+            e = (2. / n / m * tf.reduce_sum(K_xy) -
+                 1. / m / m * tf.reduce_sum(K_xx) -
+                 1. / n / n * tf.reduce_sum(K_yy))
 
         gradients_e = None
 
@@ -574,3 +660,195 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
     full_sample = y_tilde_upsampled_with_noise
 
     return y_tilde, y_tilde_upsampled, full_sample, energy_y_y_tilde
+
+
+def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2, 
+                                   max_iter=500, learning_rate=1e-2,
+                                   energy_power=2., save_iter=[100],
+                                   clip=False):
+    """Optimizes SP by resampling from known distribution each iter.
+    
+    Args:
+      known_dist_fn: Function that samples data from known distribution.
+      M: Scalar, number of data points to sample.
+      N: Scalar, number of support points to sample.
+      max_iter: Scalar, number of times to loop through updates for all vars.
+      learning_rate: Scalar, amount to move point with each gradient update.
+      clip: Boolean, chooses to clip SP to bounded range [0, 1].
+    
+    Returns:
+      sp: NumPy array of support points.
+      e_: Scalar energy value associated with those SP.
+    """
+
+    # Initialize support points in radial configuration.
+    positions = np.linspace(0,
+                            (2 * np.pi) * N / (N + 1),
+                            N)
+    y = [[0.5 + 0.25 * np.cos(rad), 0.5 + 0.25 * np.sin(rad)] for
+         rad in positions]
+    gen = np.array(y)
+    
+    # Create (M,1) NumPy array with Exponential random weight for each data point.
+    exp_weights = np.random.exponential(scale=1,
+                                        size=(M, 1)).astype(np.float32)
+
+    # Set up container for results.
+    y_out = np.zeros((max_iter, N, DIM))
+
+    # Build TensorFlow graph.
+    tf.reset_default_graph()
+    tf_input_data = tf.placeholder(tf.float32, [M, DIM], name='input_data')
+    tf_candidate_sp = tf.Variable(gen, name='sp', dtype=tf.float32)
+
+    tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=energy_power,
+                         is_tf=True, weights=exp_weights)
+
+    opt = tf.train.AdamOptimizer(learning_rate)
+    tf_grads, tf_variables = zip(*opt.compute_gradients(tf_e_out))
+    tf_optim = opt.apply_gradients(zip(tf_grads, tf_variables))
+
+    # Initialize graph.
+    tf_init_op = tf.global_variables_initializer()
+    tf_gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
+    tf_sess_config = tf.ConfigProto(allow_soft_placement=True,
+                                    gpu_options=tf_gpu_options)
+
+    # Run training.
+    with tf.Session(config=tf_sess_config) as sess:
+        sess.run(tf_init_op)
+
+        start_time = time.time()
+
+        for it in range(max_iter):
+            data = known_dist_fn(M)
+            data_, sp_, e_, e_grads_, e_vars_ = sess.run(
+                [tf_input_data, tf_candidate_sp, tf_e_out, tf_grads,
+                 tf_variables],
+                {tf_input_data: data})
+            sess.run([tf_optim], {tf_input_data: data})
+
+            # Store result in container.
+            if clip:
+                sp_ = np.clip(sp_, 0, 1)
+            y_out[it, :] = sp_
+            
+            # Plot occasionally.
+            #if data.shape[1] == 2 and it in save_iter and it > 0:
+            if 0:
+                if it > 0:
+                    print('  [*] Overall it/s: {:.4f}'.format(
+                        (time.time() - start_time) / it))
+
+                plt.scatter(data[:, 0], data[:, 1], c='gray', s=64,
+                            alpha=0.3, label='data')
+                plt.scatter(sp_[:, 0], sp_[:, 1], s=32, c='limegreen',
+                            label='sp')
+
+                # Plot arrows of gradients at each point.
+                #for i, sp in enumerate(sp_):
+                #    plt.arrow(sp[0], sp[1], *(-1. * e_grads_[0][i]),
+                #              color='white', head_width=0.02,
+                #              head_length=0.02, length_includes_head=False)
+
+                plt.title('it: {}, e_out: {:.8f}'.format(it, e_))
+                plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                #plt.xlim(0, 1)
+                #plt.ylim(0, 1)
+                plt.gca().set_aspect('equal', adjustable='box')
+                plt.show()
+
+    sp = y_out[-1]
+
+    return sp, e_
+
+
+def scatter_and_hist(x, y_all):
+    # Isolate data to plot.
+    plot_x1 = x[:, 0]
+    plot_x2 = x[:, 1]
+    plot_y1 = y_all[:, 0]
+    plot_y2 = y_all[:, 1]
+
+    # Definitions for the axes
+    left, width = 0.1, 0.65
+    bottom, height = 0.1, 0.65
+    spacing = 0.005
+    rect_scatter = [left, bottom, width, height]
+    rect_histx = [left, bottom + height + spacing, width, 0.2]
+    rect_histy = [left + width + spacing, bottom, 0.2, height]
+
+    # Start with a rectangular Figure
+    plt.figure(figsize=(8, 8))
+
+    ax_scatter = plt.axes(rect_scatter)
+    ax_scatter.tick_params(direction='in', top=True, right=True)
+    ax_histx = plt.axes(rect_histx)
+    ax_histx.tick_params(direction='in', labelbottom=False)
+    ax_histy = plt.axes(rect_histy)
+    ax_histy.tick_params(direction='in', labelleft=False)
+
+    # Make scatter plot:
+    ax_scatter.scatter(plot_x1, plot_x2, color='gray', alpha=0.3,
+                       label='data', s=32)
+    ax_scatter.scatter(plot_y1, plot_y2, color='green', alpha=0.3,
+                       label='sample', s=32)
+    #ax_scatter.set_xlim((0, 1))
+    #ax_scatter.set_ylim((0, 1))
+    ax_scatter.legend()
+
+    # Make histograms.
+    ax_histx.hist(plot_x1, bins=20, alpha=0.3, color='gray', label='data',
+                  density=True)
+    ax_histx.hist(plot_y1, bins=20, alpha=0.3, color='green', label='sample',
+                  density=True)
+    ax_histy.hist(plot_x2, bins=20, alpha=0.3, orientation='horizontal',
+                  color='gray', label='data', density=True)
+    ax_histy.hist(plot_y2, bins=20, alpha=0.3, orientation='horizontal',
+                  color='green', label='sample', density=True)
+    ax_histx.set_xlim(ax_scatter.get_xlim())
+    ax_histy.set_ylim(ax_scatter.get_ylim())
+    ax_histx.legend()
+    ax_histy.legend()
+
+    plt.show()
+    
+    
+def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
+                     IS_TF, num_draws):
+    """Measures uncertainty for samples of SP-WLB"""
+    
+    # Sample fixed data set.
+    x = sampling_fn(M)
+
+    # Set up container for results of each draw.
+    y_opt_all = np.zeros((num_draws, N, DIM))
+
+    # Take several draws of support points.
+    for i in range(num_draws):
+
+        y_opt, e_opt = get_support_points(x, N, MAX_ITER, LR,
+                                          is_tf=IS_TF,
+                                          Y_INIT_OPTION='random',
+                                          clip=False,
+                                          do_weights=True,
+                                          plot=True)
+
+        y_opt = np.clip(y_opt, np.min(x), np.max(x))
+
+        # Store this draw.
+        y_opt_all[i] = y_opt
+
+    # Collect support points from all draws.
+    y_all = np.concatenate(y_opt_all, axis=0)
+
+    # Plot them.
+    scatter_and_hist(x, y_all)
+    
+    # Print results.
+    print('mean(x) = {}, mean(y) = {}'.format(np.mean(x, axis=0),
+                                              np.mean(y_all, axis=0)))
+    print('cov(x) =')
+    print(np.cov(x, rowvar=False))
+    print('cov(y_all) =')
+    print(np.cov(y_all, rowvar=False))
