@@ -9,27 +9,47 @@ from scipy.stats import multivariate_normal
 
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
-                       Y_INIT_OPTION='radial', clip=True, do_weights=False,
+                       Y_INIT_OPTION='radial', clip='bounds', do_weights=False,
                        plot=True):
+    """Initializes and gets support points.
+    Args:
+      x: Data. ND numpy array of any length, e.g. (100, dim).
+      num_support: Scalar.
+      max_iter: Scalar, number of times to loop through updates for all vars.
+      lr: Scalar, amount to move point with each gradient update.
+      is_tf: Boolean, chooses TensorFlow optimization.
+      clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
+        are [0,1].
+      do_weights: Boolean, chooses to use Exponential random weight for 
+        each data point.
+
+    Returns:
+      y_opt: (max_iter,N,D)-array. Trace of generated proposal points.
+      e_opt: Float, energy between data and last iteration of y_out.
+    """
+        
     print('is_tf: {}, y_init: {}, clip: {}, weights: {}'.format(
         is_tf, Y_INIT_OPTION, clip, do_weights))
     
     # Initialize generated particles for both sets (y and y_).
     d = x.shape[1]
-    offset = 0.1
+    offset = 0.1 * (np.max(x) - np.min(x))
 
     if Y_INIT_OPTION == 'grid':
         grid_size = int(np.sqrt(num_support))
         assert grid_size == np.sqrt(num_support), \
             'num_support must square for grid'
-        _grid = np.linspace(offset, 1 - offset, grid_size)
+        #_grid = np.linspace(offset, 1 - offset, grid_size)
+        _grid = np.linspace(np.min(x) + offset, np.max(x) - offset, grid_size)
         y = np.array(np.meshgrid(_grid, _grid)).T.reshape(-1, d)
         # Perturb grid in order to give more diverse gradients.
         y += np.random.normal(0, 0.005, size=y.shape)
 
     elif Y_INIT_OPTION == 'random':
         #y = np.random.uniform(offset, 1 - offset, size=(num_support, d))
-        y = np.random.uniform(np.min(x), np.max(x), size=(num_support, d))
+        offset = 0.1 * (np.max(x) - np.min(x))
+        y = np.random.uniform(np.min(x) + offset, np.max(x) - offset,
+                              size=(num_support, d))
 
     elif Y_INIT_OPTION == 'radial':
         positions = np.linspace(0,
@@ -42,7 +62,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
     # Optimize particles for each dataset (x0 and x1).
     y_opt, e_opt = optimize_support_points(x, y, max_iter=max_iter,
                                            learning_rate=lr, is_tf=is_tf,
-                                           save_iter=[max_iter - 1],
+                                           save_iter=[int(max_iter / 2), max_iter - 1],
                                            #save_iter=[5, 10, 50, 100, max_iter - 1],
                                            clip=clip,
                                            do_weights=do_weights,
@@ -56,7 +76,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
 def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                             is_tf=False, energy_power=2., save_iter=[100],
-                            clip=False, do_weights=None, plot=True):
+                            clip='bounds', do_weights=None, plot=True):
     """Runs TensorFlow optimization, n times through proposal points.
     Args:
       data: ND numpy array of any length, e.g. (100, dim).
@@ -64,7 +84,8 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
       max_iter: Scalar, number of times to loop through updates for all vars.
       learning_rate: Scalar, amount to move point with each gradient update.
       is_tf: Boolean, chooses TensorFlow optimization.
-      clip: Boolean, chooses to clip SP to bounded range [0, 1].
+      clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
+        are [0,1].
       do_weights: Boolean, chooses to use Exponential random weight for 
         each data point.
 
@@ -98,7 +119,9 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
         tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=energy_power,
                              is_tf=True, weights=exp_weights)
 
+        #opt = tf.train.GradientDescentOptimizer(learning_rate)
         opt = tf.train.AdamOptimizer(learning_rate)
+        #opt = tf.train.RMSPropOptimizer(learning_rate)
         tf_grads, tf_variables = zip(*opt.compute_gradients(tf_e_out))
         tf_optim = opt.apply_gradients(zip(tf_grads, tf_variables))
 
@@ -143,8 +166,10 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
 
                 # -------------------------------------------------------------
                 # TODO: Decide whether to clip support points to domain bounds.
-                if clip:
+                if clip == 'bounds':
                     sp_ = np.clip(sp_, 0, 1)
+                elif clip == 'data':
+                    sp_ = np.clip(sp_, np.min(data), np.max(data))
                 # -------------------------------------------------------------
 
                 # Store result in container.
@@ -193,8 +218,10 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
 
             # -----------------------------------------------------------------
             # TODO: Decide whether to clip support points to domain bounds.
-            if clip:
+            if clip == 'bounds':
                 gen = np.clip(gen, 0, 1)
+            elif clip == 'data':
+                gen = np.clip(gen, np.min(data), np.max(data))
             # -----------------------------------------------------------------
 
             y_out[it, :] = gen
@@ -264,7 +291,7 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
         if weights is not None:
             p1_weights = np.tile(weights, (1, data_num))
             p2_weights = np.transpose(p1_weights)
-            K_xx = K[:data_num, :data_num] * p1_weights * p2_weights
+            K_xx = K[:data_num, :data_num] # TODO: * p1_weights * p2_weights
             K_xy = K[:data_num, data_num:] * np.tile(weights, (1, gen_num))
         else:
             K_xx = K[:data_num, :data_num]
@@ -351,7 +378,7 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
             p2_weights = tf.transpose(p1_weights)
             p1p2_weights = p1_weights * p2_weights
             p1_gen_num_weights = tf.tile(weights, (1, gen_num))
-            Kw_xx = K[:data_num, :data_num] * p1p2_weights
+            Kw_xx = K[:data_num, :data_num] # TODO: * p1p2_weights
             Kw_xy = K[:data_num, data_num:] * p1_gen_num_weights
             K_yy = K[data_num:, data_num:]
             
@@ -434,27 +461,28 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                 count += 1
 
             if count > max_count:
-                print('DID NOT REACH E-TILDE LEVEL: {:.6f} < {:.6f}'.format(
+                print(('ERROR: Did not reach e_tilde level: {:.6f} < {:.6f}'
+                       '\nIncrease step size or diffusion max_count.').format(
                     energy_y_y_tilde, e_tilde))
                 sys.exit()
-            elif count <= max_count and i % (int(num_y_tildes / 4) + 1) == 0:
-                print(('Diffusion count {:5}, e_opt: {:9.6f}, e~: {:6.6f}, '
-                       'energy(y,y~): {:5.6f}, error%: {:.6f}').format(
-                    count, e_opt, e_tilde, energy_y_y_tilde,
-                    (energy_y_y_tilde - e_tilde) / e_tilde))
-                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                            label='data')
-                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                            label='sp(data)')
-                plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7,
-                            label='~sp(data)')
-                plt.title('{}, it: {}, e(Yt, Y*)={:.4f}'.format(
-                    method, i, energy_y_y_tilde))
-                plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-                plt.xlim(0, 1)
-                plt.ylim(0, 1)
-                plt.gca().set_aspect('equal', adjustable='box')
-                plt.show()
+
+            print(('Diffusion count {:5}, e_opt: {:9.6f}, e~: {:6.6f}, '
+                   'energy(y,y~): {:5.6f}, error%: {:.6f}').format(
+                count, e_opt, e_tilde, energy_y_y_tilde,
+                (energy_y_y_tilde - e_tilde) / e_tilde))
+            plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
+                        label='data')
+            plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
+                        label='sp(data)')
+            plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7,
+                        label='~sp(data)')
+            plt.title('{}, it: {}, e(Yt, Y*)={:.4f}'.format(
+                method, i, energy_y_y_tilde))
+            plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+            plt.xlim(0, 1)
+            plt.ylim(0, 1)
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.show()
 
             # Append the accepted energy value to a list for later analysis.
             y_tildes[i] = y_tilde
@@ -523,23 +551,23 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                 y_mh[i] = y_t
                 energies_unthinned[i] = energy_t
 
-            if i % int(chain_length / 4) == 0:
-                # Plot the points.
-                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                            label='data')
-                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                            label='sp(data)')
-                plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
-                            label='~sp(data)')
-                plt.title(('{}, it: {}, e(Yt, Y*)={:.4f}, '
-                           'ratio={:.3f}, accepted: {}').format(
-                               method, i, energies_unthinned[i],
-                               ratios_unthinned[i], accepted_current))
-                plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-                plt.xlim(0, 1)
-                plt.ylim(0, 1)
-                plt.gca().set_aspect('equal', adjustable='box')
-                plt.show()
+            
+            # Plot the points.
+            plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
+                        label='data')
+            plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
+                        label='sp(data)')
+            plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
+                        label='~sp(data)')
+            plt.title(('{}, it: {}, e(Yt, Y*)={:.4f}, '
+                       'ratio={:.3f}, accepted: {}').format(
+                           method, i, energies_unthinned[i],
+                           ratios_unthinned[i], accepted_current))
+            plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+            plt.xlim(0, 1)
+            plt.ylim(0, 1)
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.show()
 
         # Thinned results.
         y_tildes = y_mh[burnin::thinning]
@@ -790,7 +818,7 @@ def scatter_and_hist(x, y_all):
 
     # Make scatter plot:
     ax_scatter.scatter(plot_x1, plot_x2, color='gray', alpha=0.3,
-                       label='data', s=32)
+                       label='data', s=128)
     ax_scatter.scatter(plot_y1, plot_y2, color='green', alpha=0.3,
                        label='sample', s=32)
     #ax_scatter.set_xlim((0, 1))
@@ -815,7 +843,7 @@ def scatter_and_hist(x, y_all):
     
     
 def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
-                     IS_TF, num_draws):
+                     IS_TF, num_draws, plot=False):
     """Measures uncertainty for samples of SP-WLB"""
     
     # Sample fixed data set.
@@ -826,16 +854,13 @@ def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
 
     # Take several draws of support points.
     for i in range(num_draws):
-
         y_opt, e_opt = get_support_points(x, N, MAX_ITER, LR,
                                           is_tf=IS_TF,
                                           Y_INIT_OPTION='random',
-                                          clip=False,
+                                          clip='data',
                                           do_weights=True,
-                                          plot=True)
-
-        y_opt = np.clip(y_opt, np.min(x), np.max(x))
-
+                                          plot=plot)
+        
         # Store this draw.
         y_opt_all[i] = y_opt
 
@@ -845,10 +870,25 @@ def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
     # Plot them.
     scatter_and_hist(x, y_all)
     
-    # Print results.
+    # Show results for FULL SAMPLE.
     print('mean(x) = {}, mean(y) = {}'.format(np.mean(x, axis=0),
                                               np.mean(y_all, axis=0)))
     print('cov(x) =')
     print(np.cov(x, rowvar=False))
     print('cov(y_all) =')
     print(np.cov(y_all, rowvar=False))
+    
+    
+    
+    # Show UNCERTAINTY around specific estimations, e.g. mean, variance.
+    elements = range(DIM)
+    for element in elements:
+        xe = x[:, element]
+        xe_mean = np.mean(xe)
+        ye_means = [np.mean(y, axis=0)[element] for y in y_opt_all]
+        plt.hist(ye_means, density=True, color='green', label='estimate',
+                 alpha=0.3)
+        plt.axvline(x=xe_mean, color='gray', label='data')
+        plt.legend()
+        plt.title('Marginal mean estimation, element {}'.format(element))
+        plt.show()
