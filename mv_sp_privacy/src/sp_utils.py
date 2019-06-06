@@ -603,6 +603,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
     return y_tildes, energies
 
 
+# TODO: DEPRECATE.
 def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
     """Computes likelihood of data set, given cluster centers and weights.
 
@@ -630,8 +631,9 @@ def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
     return pts_likelihood
 
 
+
 def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
-    """Computes likelihood of data set, given cluster centers and weights.
+    """Computes likelihood of data set, given cluster centers and bandwidth.
 
     Args:
       x: NumPy array of raw, full data set.
@@ -640,38 +642,107 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
       do_log: Boolean, choose to do computations in log scale.
 
     Returns:
-      density: Scalar likelihood value for given data set.
+      likelihood: Scalar likelihood value for given data set.
     """
     dim = x.shape[1]
+
+    # Set up spherical Gaussian distribution functions centered on
+    # each point in the noisy support point set.
     gaussians = [
         multivariate_normal(y, bandwidth * np.eye(dim)) for y in y_tilde]
 
     def pt_likelihood(pt):
-        # Summation of weighted gaussians.
-        return 1. / len(gaussians) * sum([gauss.pdf(pt) for gauss in gaussians])
+        # (Log-)Likelihood of single point on mixture of Gaussians.
+        lik_per_gaussian = [gauss.pdf(pt) for gauss in gaussians]
+        lik = 1. / len(gaussians) * sum(lik_per_gaussian)
+        return lik, lik_per_gaussian
 
     if do_log:
-        pts_likelihood = sum([np.log(pt_likelihood(pt)) for pt in x])
-    else:
-        pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
+        # OLD
+        #likelihood = sum([np.log(pt_likelihood(pt)) for pt in x])
+        
+        # NEW
+        #likelihood = sum([np.log(pt_likelihood(pt)[0]) for pt in x])
+        
+        
+        # ---------------------------
+        # NEW WITH TROUBLESHOOTING.
+        
+        gmm_component_liks = []
+        liks = []
+        lliks = []
+        for pt in x:
+            lik, lik_per_gaussian = pt_likelihood(pt)
+            
+            # troubleshoot
+            liks.append(lik)
+            lliks.append(np.log(lik))
+            sort_lik = sorted(lik_per_gaussian, reverse=True)
+            gmm_component_liks.append(sort_lik)
+            
 
-    if pts_likelihood == np.Inf:
+        prod_liks = np.prod(liks)
+        sum_lliks = np.sum(lliks)
+        likelihood = sum_lliks
+        
+        
+        gmm_component_liks = np.array(gmm_component_liks)
+        xs = np.arange(gmm_component_liks.shape[1]).reshape(-1)
+        #print(gmm_component_liks)
+        for pt_component_lik in gmm_component_liks:
+            plt.plot(xs, pt_component_lik, marker=".")    
+        low = np.min(gmm_component_liks)
+        high = np.max(gmm_component_liks)
+        plt.title('gmm component likelihoods: sorted, point-wise (M={}); bw={:.5f}'.format(
+            bandwidth, len(x)))
+        plt.xlabel('gmm components, sorted by lik')
+        plt.ylabel('lik')
+        plt.show()
+        
+        plt.hist(liks)
+        plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
+            bandwidth, prod_liks))
+        plt.show()
+        
+        plt.hist(lliks)
+        plt.title('log-likelihoods point-wise, bw={:.5f}, sum_llik={:3.3e}'.format(
+            bandwidth, sum_lliks))
+        plt.show()
+        
+        print('prod_liks={:3.3e}, log_prod_lik={:3.3e}, sum_llik={:3.3e}\n\n'.format(
+            np.prod(liks), np.log(np.prod(liks)), np.sum(lliks)))
+        if not np.isclose(np.log(prod_liks), sum_lliks):
+            print('Check sum_lliks computation')
+            pdb.set_trace()
+
+
+        # ---------------------------
+
+        
+        
+    else:
+        likelihood = np.prod([pt_likelihood(pt) for pt in x])
         pdb.set_trace()
 
-    return pts_likelihood, do_log
+
+    if likelihood == np.Inf:
+        pdb.set_trace()
+
+    return likelihood, do_log
 
 
 def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
                                  STEP_SIZE, ALPHA, BANDWIDTH, SAMPLE_SIZE,
-                                 mus=None, weights=None, sigma_data=None):
+                                 mus=None, weights=None, sigma_data=None,
+                                 plot=False):
     """Samples one full-size data set, given a bandwidth.
 
     Args:
       ... args from earlier ...
 
     Return:
-       y_tilde: NumPy array of sampled, private support points.
-       full_sample: NumPy array of kernel density expansion of y_tilde.
+      y_tilde: NumPy array of sampled, private support points.
+      full_sample: NumPy array of kernel density expansion of y_tilde.
     """
 
     ys, es = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
@@ -685,9 +756,25 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
     y_tilde_upsampled_with_noise = (
         y_tilde_upsampled + np.random.normal(0, BANDWIDTH,
                                              size=(SAMPLE_SIZE, x.shape[1])))
-    full_sample = y_tilde_upsampled_with_noise
+    y_tilde_expansion = y_tilde_upsampled_with_noise
+    
+    # Optionally plot results.
+    if plot:
+        plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3, label='data')
+        plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7, 
+                    label='~sp(data)')
+        plt.scatter(y_tilde_expansion[:, 0], y_tilde_expansion[:, 1], c='blue', 
+                    alpha=0.3, label='FULL')
 
-    return y_tilde, y_tilde_upsampled, full_sample, energy_y_y_tilde
+        plt.title('Diffusion, and PRE-SELECTED w = {}'.format(BANDWIDTH))
+        plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        #plt.xlim(0, 1)
+        #plt.ylim(0, 1)
+        plt.gca().set_aspect('equal', adjustable='box')
+        plt.show()
+
+
+    return y_tilde, y_tilde_upsampled, y_tilde_expansion, energy_y_y_tilde
 
 
 def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2, 
