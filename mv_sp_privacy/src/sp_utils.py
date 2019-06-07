@@ -437,6 +437,8 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         # Start with copy of optimal support points, then diffuse until
         # energy(true, copy) is at least e_tilde.
 
+        MAX_COUNT_DIFFUSION = 1e6
+        
         y_tildes = np.zeros((num_y_tildes, y_opt.shape[0], y_opt.shape[1]))
         energies = np.zeros(num_y_tildes)
 
@@ -450,9 +452,8 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             y_tilde = y_opt.copy()
             energy_y_y_tilde = 0.
             count = 0
-            max_count = 1e5
 
-            while energy_y_y_tilde < e_tilde and count <= max_count:
+            while energy_y_y_tilde < e_tilde and count <= MAX_COUNT_DIFFUSION:
                 y_tilde += np.random.normal(0, step_size, size=y_tilde.shape)
                 y_tilde = np.clip(y_tilde, 0, 1)
 
@@ -460,7 +461,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 
                 count += 1
 
-            if count > max_count:
+            if count > MAX_COUNT_DIFFUSION:
                 print(('ERROR: Did not reach e_tilde level: {:.6f} < {:.6f}'
                        '\nIncrease step size or diffusion max_count.').format(
                     energy_y_y_tilde, e_tilde))
@@ -603,7 +604,9 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
     return y_tildes, energies
 
 
+# ----------------
 # TODO: DEPRECATE.
+
 def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
     """Computes likelihood of data set, given cluster centers and weights.
 
@@ -630,9 +633,10 @@ def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
 
     return pts_likelihood
 
+# ----------------
 
 
-def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
+def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
     """Computes likelihood of data set, given cluster centers and bandwidth.
 
     Args:
@@ -640,6 +644,7 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
       y_tilde: NumPy array of cluster/kernel centers.
       bandwidth: Scalar bandwidth of kernels.
       do_log: Boolean, choose to do computations in log scale.
+      tag: String, in graph title.
 
     Returns:
       likelihood: Scalar likelihood value for given data set.
@@ -674,9 +679,12 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
         for pt in x:
             lik, lik_per_gaussian = pt_likelihood(pt)
             
-            # troubleshoot
-            liks.append(lik)
-            lliks.append(np.log(lik))
+            try:
+                liks.append(lik)
+                lliks.append(np.log(lik))
+            except:
+                #pdb.set_trace()
+                pass
             sort_lik = sorted(lik_per_gaussian, reverse=True)
             gmm_component_liks.append(sort_lik)
             
@@ -685,7 +693,7 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
         sum_lliks = np.sum(lliks)
         likelihood = sum_lliks
         
-        
+        # Plot likelihood of all components for each data point x.
         gmm_component_liks = np.array(gmm_component_liks)
         xs = np.arange(gmm_component_liks.shape[1]).reshape(-1)
         #print(gmm_component_liks)
@@ -693,27 +701,40 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True):
             plt.plot(xs, pt_component_lik, marker=".")    
         low = np.min(gmm_component_liks)
         high = np.max(gmm_component_liks)
-        plt.title('gmm component likelihoods: sorted, point-wise (M={}); bw={:.5f}'.format(
-            bandwidth, len(x)))
+        plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
+            tag, len(x), bandwidth))
         plt.xlabel('gmm components, sorted by lik')
         plt.ylabel('lik')
         plt.show()
         
+        # Plot histogram of point likelihoods.
+        """
         plt.hist(liks)
         plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
             bandwidth, prod_liks))
         plt.show()
         
-        plt.hist(lliks)
-        plt.title('log-likelihoods point-wise, bw={:.5f}, sum_llik={:3.3e}'.format(
-            bandwidth, sum_lliks))
-        plt.show()
+        if -np.Inf in lliks:
+            print('lliks contains -Inf. Quintiles: {}'.format(
+                np.percentile(lliks, [0, 20, 40, 60, 80, 100])))
+        else:
+            try:
+                plt.hist(lliks)
+                plt.title('log-likelihoods point-wise, bw={:.5f}, sum_llik={:3.3e}'.format(
+                    bandwidth, sum_lliks))
+                plt.show()
+            except:
+                pdb.set_trace()
+        """
         
-        print('prod_liks={:3.3e}, log_prod_lik={:3.3e}, sum_llik={:3.3e}\n\n'.format(
-            np.prod(liks), np.log(np.prod(liks)), np.sum(lliks)))
-        if not np.isclose(np.log(prod_liks), sum_lliks):
-            print('Check sum_lliks computation')
-            pdb.set_trace()
+        print('\t prod_liks={:3.3e},\n\t log_prod_liks={:3.3e},\n\t sum_lliks={:3.3e}\n\n'.format(
+            prod_liks, np.log(prod_liks), sum_lliks))
+        if prod_liks == 0. and np.log(prod_liks) == -np.Inf:
+            pass
+        elif not np.isclose(np.log(prod_liks), sum_lliks):
+            print('\t [!] Check sum_lliks computation')
+            #pdb.set_trace()
+            pass
 
 
         # ---------------------------
