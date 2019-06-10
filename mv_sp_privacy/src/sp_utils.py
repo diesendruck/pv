@@ -1,15 +1,17 @@
+import matplotlib.pyplot as plt
 import numpy as np
+import os
+import pdb
+import sys
 import tensorflow as tf
 import time
-import matplotlib.pyplot as plt
-import sys
-import pdb
+
 
 from scipy.stats import multivariate_normal
 
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
-                       Y_INIT_OPTION='radial', clip='bounds', do_weights=False,
+                       Y_INIT_OPTION='radial', clip='bounds', do_wlb=False,
                        plot=True):
     """Initializes and gets support points.
     Args:
@@ -20,7 +22,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
       is_tf: Boolean, chooses TensorFlow optimization.
       clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
         are [0,1].
-      do_weights: Boolean, chooses to use Exponential random weight for 
+      do_wlb: Boolean, chooses to use Exponential random weight for 
         each data point.
 
     Returns:
@@ -28,8 +30,8 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
       e_opt: Float, energy between data and last iteration of y_out.
     """
         
-    print('is_tf: {}, y_init: {}, clip: {}, weights: {}'.format(
-        is_tf, Y_INIT_OPTION, clip, do_weights))
+    print('is_tf: {}, y_init: {}, clip: {}, wlb: {}'.format(
+        is_tf, Y_INIT_OPTION, clip, do_wlb))
     
     # Initialize generated particles for both sets (y and y_).
     d = x.shape[1]
@@ -62,10 +64,11 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
     # Optimize particles for each dataset (x0 and x1).
     y_opt, e_opt = optimize_support_points(x, y, max_iter=max_iter,
                                            learning_rate=lr, is_tf=is_tf,
-                                           save_iter=[int(max_iter / 2), max_iter - 1],
+                                           #save_iter=[int(max_iter / 2), max_iter - 1],
                                            #save_iter=[5, 10, 50, 100, max_iter - 1],
+                                           save_iter=[max_iter - 1],
                                            clip=clip,
-                                           do_weights=do_weights,
+                                           do_wlb=do_wlb,
                                            plot=plot)
 
     # Get last updated set as support points.
@@ -76,7 +79,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
 def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                             is_tf=False, energy_power=2., save_iter=[100],
-                            clip='bounds', do_weights=None, plot=True):
+                            clip='bounds', do_wlb=None, plot=True):
     """Runs TensorFlow optimization, n times through proposal points.
     Args:
       data: ND numpy array of any length, e.g. (100, dim).
@@ -86,7 +89,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
       is_tf: Boolean, chooses TensorFlow optimization.
       clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
         are [0,1].
-      do_weights: Boolean, chooses to use Exponential random weight for 
+      do_wlb: Boolean, chooses to use Exponential random weight for 
         each data point.
 
     Returns:
@@ -94,7 +97,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
       e_opt: Float, energy between data and last iteration of y_out.
     """
     
-    if do_weights:
+    if do_wlb:
         # Create (M,1) NumPy array with Exponential random weight for each data point.
         exp_weights = np.random.exponential(scale=1,
                                             size=(data.shape[0], 1)).astype(np.float32)
@@ -197,12 +200,13 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     #              head_length=0.02, length_includes_head=False)
 
                     plt.title('it: {}, e_out: {:.8f}'.format(it, e_))
-                    plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                    #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
                     #plt.xlim(0, 1)
                     #plt.ylim(0, 1)
                     plt.gca().set_aspect('equal', adjustable='box')
                     plt.show()
-
+                    
+            print('Time elapsed: {}'.format(time.time() - start_time))
                     
     # Set up NumPy optimization.
     elif not is_tf:
@@ -244,7 +248,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                 #              head_length=0.02, length_includes_head=False)
 
                 plt.title('it: {}, e_out: {:.8f}'.format(it, e_))
-                plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
                 #plt.xlim(0, 1)
                 #plt.ylim(0, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
@@ -407,7 +411,8 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
 
 
 def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
-                       step_size, num_y_tildes, alpha=1.):
+                       step_size=1e-1, num_y_tildes=1, alpha=1., plot=False,
+                       diffusion_mean=False):
     """Samples in space of support points.
 
     Args:
@@ -419,10 +424,13 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       step_size: Float, amount to step in diffusion or MH.
       num_y_tildes: Samples of support points to draw.
       alpha: Float, privacy budget.
+      plot: Boolean, controls plotting.
+      diffusion_mean: Picks mean instead of sampling from Exponential.
 
     Returns:
       y_tildes: NumPy array, sampled support point sets.
       energies: NumPy array, energies associated with sampled sets.
+      energies_prediffusion: NumPy array, energies sampled from ExpMech.
     """
     sensitivity_string = ('\nPr(e) ~ Exp(2U/a) = a / (2U) * exp(- a / (2U) * e)'
                           ' = Exp(2 * {:.4f} / {:.3f}) = Exp({:.4f})\n'.format(
@@ -437,24 +445,48 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         # Start with copy of optimal support points, then diffuse until
         # energy(true, copy) is at least e_tilde.
 
-        MAX_COUNT_DIFFUSION = 1e6
+        MAX_COUNT_DIFFUSION = 1e5
         
         y_tildes = np.zeros((num_y_tildes, y_opt.shape[0], y_opt.shape[1]))
         energies = np.zeros(num_y_tildes)
+        energies_prediffusion = np.zeros(num_y_tildes)
+        energy_estimation_errors = np.zeros((num_y_tildes, 2))  # [[energy val, error], ...]
 
         for i in range(num_y_tildes):
             # TODO: Must be {larger than optimal energy distance, positive}.
             # e_tilde = np.abs(np.random.laplace(
             #     scale=2. * energy_sensitivity / alpha))
-            e_tilde = np.random.exponential(
-                scale=2. * energy_sensitivity / alpha)
-
+            if diffusion_mean:
+                print('Using diffusion mean:')
+                e_tilde = 2. * energy_sensitivity / alpha
+            else:
+                e_tilde = np.random.exponential(
+                    scale=2. * energy_sensitivity / alpha)
+            print('Exp. mean: {:.5f}, e_tilde: {:.5f}'.format(2. * energy_sensitivity / alpha,
+                                                              e_tilde))
+            
+            # Adjust step size depending on e_tilde.
+            #if e_tilde > energy_sensitivity:
+            factor = e_tilde / energy_sensitivity
+            
+            if factor > 1:
+                factor *= 10
+            #elif factor > 10:
+            #    factor *= 20
+            else:
+                factor *= 2
+            step_size_adjusted = step_size * factor
+            print('  step_size_factor: {:.5f}, adjusted: {} -> {:.5f}'.format(
+                factor, step_size, step_size_adjusted))
+            
             y_tilde = y_opt.copy()
             energy_y_y_tilde = 0.
             count = 0
 
             while energy_y_y_tilde < e_tilde and count <= MAX_COUNT_DIFFUSION:
-                y_tilde += np.random.normal(0, step_size, size=y_tilde.shape)
+                y_tilde += np.random.normal(0, step_size_adjusted, size=y_tilde.shape)
+                
+                #y_tilde += np.random.normal(0, step_size, size=y_tilde.shape)
                 y_tilde = np.clip(y_tilde, 0, 1)
 
                 energy_y_y_tilde, _ = energy(y_opt, y_tilde)
@@ -462,32 +494,52 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                 count += 1
 
             if count > MAX_COUNT_DIFFUSION:
+                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
+                            label='data')
+                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
+                            label='sp(data)')
+                plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7,
+                            label='~sp(data)')
+                plt.title('{}, it: {}, e(Yt, Y*)={:.4f}\n'.format(
+                    method, i, energy_y_y_tilde))
+                #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                plt.xlim(0, 1)
+                plt.ylim(0, 1)
+                plt.gca().set_aspect('equal', adjustable='box')
+                plt.show()
                 print(('ERROR: Did not reach e_tilde level: {:.6f} < {:.6f}'
                        '\nIncrease step size or diffusion max_count.').format(
                     energy_y_y_tilde, e_tilde))
                 sys.exit()
 
-            print(('Diffusion count {:5}, e_opt: {:9.6f}, e~: {:6.6f}, '
-                   'energy(y,y~): {:5.6f}, error%: {:.6f}').format(
-                count, e_opt, e_tilde, energy_y_y_tilde,
-                (energy_y_y_tilde - e_tilde) / e_tilde))
-            plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                        label='data')
-            plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                        label='sp(data)')
-            plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7,
-                        label='~sp(data)')
-            plt.title('{}, it: {}, e(Yt, Y*)={:.4f}'.format(
-                method, i, energy_y_y_tilde))
-            plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-            plt.xlim(0, 1)
-            plt.ylim(0, 1)
-            plt.gca().set_aspect('equal', adjustable='box')
-            plt.show()
+                
+            error = (energy_y_y_tilde - e_tilde) / e_tilde
 
+            print(('  Diffusion count {:5}, e_opt: {:9.6f}, (e(y, y~) - e~) / e~ '
+                   '= error%: ({:5.5f} - {:5.5f}) / {:5.5f} = {:5.5f}').format(
+                       count, e_opt, energy_y_y_tilde, e_tilde, e_tilde, error))
+            
+            
             # Append the accepted energy value to a list for later analysis.
             y_tildes[i] = y_tilde
             energies[i] = energy_y_y_tilde
+            energies_prediffusion[i] = e_tilde
+            energy_estimation_errors[i] = [energy_y_y_tilde, error]
+            
+            if plot:
+                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
+                            label='data')
+                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
+                            label='sp(data)')
+                plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7,
+                            label='~sp(data)')
+                plt.title('{}, it: {}, e(Yt, Y*)={:.4f}\n'.format(
+                    method, i, energy_y_y_tilde))
+                #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                plt.xlim(0, 1)
+                plt.ylim(0, 1)
+                plt.gca().set_aspect('equal', adjustable='box')
+                plt.show()
 
     elif method == 'mh':
 
@@ -554,21 +606,22 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 
             
             # Plot the points.
-            plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                        label='data')
-            plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                        label='sp(data)')
-            plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
-                        label='~sp(data)')
-            plt.title(('{}, it: {}, e(Yt, Y*)={:.4f}, '
-                       'ratio={:.3f}, accepted: {}').format(
-                           method, i, energies_unthinned[i],
-                           ratios_unthinned[i], accepted_current))
-            plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-            plt.xlim(0, 1)
-            plt.ylim(0, 1)
-            plt.gca().set_aspect('equal', adjustable='box')
-            plt.show()
+            if plot:
+                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
+                            label='data')
+                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
+                            label='sp(data)')
+                plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
+                            label='~sp(data)')
+                plt.title(('{}, it: {}, e(Yt, Y*)={:.4f}, '
+                           'ratio={:.3f}, accepted: {}').format(
+                               method, i, energies_unthinned[i],
+                               ratios_unthinned[i], accepted_current))
+                #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+                plt.xlim(0, 1)
+                plt.ylim(0, 1)
+                plt.gca().set_aspect('equal', adjustable='box')
+                plt.show()
 
         # Thinned results.
         y_tildes = y_mh[burnin::thinning]
@@ -577,36 +630,36 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         # dups = [y_tildes[i] == y_tildes[i-1] for i in range(1, len(y_tildes))]
 
         # Plot results of markov chain.
-        plt.plot(ratios)
-        plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
-        plt.show()
-        plt.plot(energies)
-        plt.title('energies, median={:.5f}'.format(np.median(energies)))
-        plt.show()
+        if plot:
+            plt.plot(ratios)
+            plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
+            plt.show()
+            plt.plot(energies)
+            plt.title('energies, median={:.5f}'.format(np.median(energies)))
+            plt.show()
 
-        # Inspect correlation of energies.
-        print('Acceptance ratio: {}'.format(len(accepts) / chain_length))
-        print('percent steps that improved energy score: {}'.format(
-            sum(ratios_unthinned > 1.) / len(ratios_unthinned)))
-        plt.acorr(energies, maxlags=10)
-        plt.show()
+            # Inspect correlation of energies.
+            print('Acceptance ratio: {}'.format(len(accepts) / chain_length))
+            print('percent steps that improved energy score: {}'.format(
+                sum(ratios_unthinned > 1.) / len(ratios_unthinned)))
+            plt.acorr(energies, maxlags=10)
+            plt.show()
 
-        # Inspect distribution of energies.
-        plt.title('Energies with MH, n={}'.format(len(energies)))
-        plt.hist(energies, bins=20, alpha=0.3)
-        plt.show()
+            # Inspect distribution of energies.
+            plt.title('Energies with MH, n={}'.format(len(energies)))
+            plt.hist(energies, bins=20, alpha=0.3)
+            plt.show()
 
         # --------------------------------------------------------------
 
     else:
         print('Method not recognized.')
 
-    return y_tildes, energies
+    return y_tildes, energies, energies_prediffusion, energy_estimation_errors
 
 
 # ----------------
 # TODO: DEPRECATE.
-
 def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
     """Computes likelihood of data set, given cluster centers and weights.
 
@@ -632,7 +685,6 @@ def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
     pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
 
     return pts_likelihood
-
 # ----------------
 
 
@@ -708,12 +760,12 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
         plt.show()
         
         # Plot histogram of point likelihoods.
-        """
+
         plt.hist(liks)
         plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
             bandwidth, prod_liks))
         plt.show()
-        
+        """        
         if -np.Inf in lliks:
             print('lliks contains -Inf. Quintiles: {}'.format(
                 np.percentile(lliks, [0, 20, 40, 60, 80, 100])))
@@ -766,8 +818,8 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
       full_sample: NumPy array of kernel density expansion of y_tilde.
     """
 
-    ys, es = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
-                                'diffusion', STEP_SIZE, 1, alpha=ALPHA)
+    ys, es, _, _ = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
+                                   'diffusion', STEP_SIZE, 1, alpha=ALPHA)
     y_tilde = ys[0]
     energy_y_y_tilde = es[0]
 
@@ -787,7 +839,7 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
         plt.scatter(y_tilde_expansion[:, 0], y_tilde_expansion[:, 1], c='blue', 
                     alpha=0.3, label='FULL')
 
-        plt.title('Diffusion, and PRE-SELECTED w = {}'.format(BANDWIDTH))
+        plt.title('Diffusion, and PRE-SELECTED w = {:.5f}'.format(BANDWIDTH))
         plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         #plt.xlim(0, 1)
         #plt.ylim(0, 1)
@@ -894,6 +946,9 @@ def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2,
                 plt.gca().set_aspect('equal', adjustable='box')
                 plt.show()
 
+    time_elapsed = time.time() - time_start
+    print('Time elapsed: {}'.format(time_elapsed))                
+                
     sp = y_out[-1]
 
     return sp, e_
@@ -966,7 +1021,7 @@ def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
                                           is_tf=IS_TF,
                                           Y_INIT_OPTION='random',
                                           clip='data',
-                                          do_weights=True,
+                                          do_wlb=True,
                                           plot=plot)
         
         # Store this draw.
