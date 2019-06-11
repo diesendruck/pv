@@ -430,7 +430,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
     Returns:
       y_tildes: NumPy array, sampled support point sets.
       energies: NumPy array, energies associated with sampled sets.
-      energies_prediffusion: NumPy array, energies sampled from ExpMech.
+      energy_estimation_errors: NumPy array, relative error of energy approximation.
     """
     sensitivity_string = ('\nPr(e) ~ Exp(2U/a) = a / (2U) * exp(- a / (2U) * e)'
                           ' = Exp(2 * {:.4f} / {:.3f}) = Exp({:.4f})\n'.format(
@@ -449,7 +449,6 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         
         y_tildes = np.zeros((num_y_tildes, y_opt.shape[0], y_opt.shape[1]))
         energies = np.zeros(num_y_tildes)
-        energies_prediffusion = np.zeros(num_y_tildes)
         energy_estimation_errors = np.zeros((num_y_tildes, 2))  # [[energy val, error], ...]
 
         for i in range(num_y_tildes):
@@ -470,7 +469,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             factor = e_tilde / energy_sensitivity
             
             if factor > 1:
-                factor *= 10
+                factor *= 5
             #elif factor > 10:
             #    factor *= 20
             else:
@@ -523,7 +522,6 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             # Append the accepted energy value to a list for later analysis.
             y_tildes[i] = y_tilde
             energies[i] = energy_y_y_tilde
-            energies_prediffusion[i] = e_tilde
             energy_estimation_errors[i] = [energy_y_y_tilde, error]
             
             if plot:
@@ -541,20 +539,23 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                 plt.gca().set_aspect('equal', adjustable='box')
                 plt.show()
 
+                
     elif method == 'mh':
 
         # ----------------- ALGORITHM 2: METROPOLIS HASTINGS -----------------
 
-        # TODO: Let Y* be optimal support points. Initialize Y_t as a sample
-        #   from uniform. Let Y_t' = Y_t + random walk noise. For differential
-        #   privacy level a and sensitivity U, let acceptance ratio of Y_t' be
-        #     \gamma = exp(a / (2U) * [e(Y_t, Y*) - e(Y_t', Y*)]).
-        #   Then accept Y_t' with probability min(1, \gamma).
+        # Let Y* be optimal support points. Initialize Y_t as Y*. Let
+        # Y_t' = Y_t + random walk noise. For differential privacy level a
+        # and sensitivity U, let acceptance ratio of Y_t' be
+        #   \gamma = exp(a / (2U) * [e(Y_t, Y*) - e(Y_t', Y*)]).
+        # Then accept Y_t' with probability min(1, \gamma).
 
         # Choose setup for Metropolis-Hastings.
         burnin = 1000
-        thinning = 500
+        thinning = 200
         chain_length = burnin + thinning * num_y_tildes
+        print('Running chain. Length={}, Burn={}, Thin={}, Step={}'.format(
+                chain_length, burnin, thinning, step_size))
 
         # Initialize the support points Y_t.
         # y_t = np.random.uniform(size=y_opt.shape)
@@ -566,28 +567,38 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         ratios_unthinned = np.zeros(chain_length)
         energies_unthinned = np.zeros(chain_length)
         accepts = []
+        
+        # Factor for difference of energies in MH step.
+        diff_factor = alpha / (2. * energy_sensitivity)
+        print('Difference factor: {:.2f}'.format(diff_factor))
+
 
         for i in range(chain_length):
             # Add random walk noise to current set of support points.
-            y_t_candidate = y_t + np.random.normal(scale=step_size,
-                                                   size=y_t.shape)
+            y_update = np.random.normal(scale=step_size, size=y_t.shape)
+            #y_update_mask = np.tile(
+            #    np.round(np.random.uniform(size=[y_t.shape[0], 1])),
+            #    [1, y_t.shape[1]])
+            y_t_candidate = y_t + y_update #* y_update_mask
+            
             y_t_candidate = np.clip(y_t_candidate, 0, 1)
             energy_t, _ = energy(y_opt, y_t)
             energy_t_candidate, _ = energy(y_opt, y_t_candidate)
 
             # Compute the acceptance ratio.
-            # With U = 2 * DIM ** (1. / ENERGY_POWER) / N ** 2
-            #
+            # With U = 2 * DIM ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
+            # 
             #         exp(- a / (2U) * e_t')
-            # ratio = ----------------------
+            # ratio = ---------------------- = exp( a / (2U) * (e_t - e_t'))
             #         exp(- a / (2U) * e_t)
             #
             # As N increases, U decreases, and energy difference is magnified.
             # Also, as alpha increases, energy difference is magnified.
-            ratios_unthinned[i] = np.exp(
-                alpha / (2. * energy_sensitivity) *
-                (energy_t - energy_t_candidate))
-
+            # Therefore, with more support points and higher alpha, energy
+            #   difference is magnified.
+            energy_diff = energy_t - energy_t_candidate
+            ratios_unthinned[i] = np.exp(diff_factor * energy_diff)
+            
             # print('e_t - e_t\' = {:.5f}, ratio = {:6f}'.format(
             #       energy_t - energy_t_candidate, ratios_unthinned[i]))
             # pdb.set_trace()
@@ -606,22 +617,28 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 
             
             # Plot the points.
-            if plot:
+            if plot and i % (thinning * 10) == 0:
                 plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
                             label='data')
                 plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
                             label='sp(data)')
                 plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
                             label='~sp(data)')
-                plt.title(('{}, it: {}, e(Yt, Y*)={:.4f}, '
-                           'ratio={:.3f}, accepted: {}').format(
-                               method, i, energies_unthinned[i],
-                               ratios_unthinned[i], accepted_current))
+                #plt.title(('{}, it: {}, e(Yt, Y*)={:.4f}, '
+                #           'ratio={:.3f}, accepted: {}\n').format(
+                #               method, i, energies_unthinned[i],
+                #               ratios_unthinned[i], accepted_current))
                 #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
                 plt.xlim(0, 1)
                 plt.ylim(0, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
+                plt.tight_layout()
+                plt.savefig('../output/fig_mh_sample.png')
                 plt.show()
+                
+                print('Acceptance rate: {}'.format(float(len(accepts)) / (i + 1)))
+                print('Energy diff: {:.8f}'.format(energy_diff))
+
 
         # Thinned results.
         y_tildes = y_mh[burnin::thinning]
@@ -629,13 +646,26 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         energies = energies_unthinned[burnin::thinning]
         # dups = [y_tildes[i] == y_tildes[i-1] for i in range(1, len(y_tildes))]
 
+        energy_estimation_errors = None
+        
         # Plot results of markov chain.
         if plot:
+            # Plot acceptance ratios.
             plt.plot(ratios)
-            plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
+            #plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
+            plt.xlabel('Sample', fontsize=14)
+            plt.ylabel('Acceptance ratio', fontsize=14)
+            plt.tight_layout()
+            plt.savefig('../output/fig_mh_acceptance_ratios.png')
             plt.show()
+            
+            # Plot traceplot of energies.
             plt.plot(energies)
-            plt.title('energies, median={:.5f}'.format(np.median(energies)))
+            #plt.title('energies, median={:.5f}'.format(np.median(energies)))
+            plt.xlabel('Sample', fontsize=14)
+            plt.ylabel(r'Energy, $e(y, \tilde{y})$', fontsize=14)
+            plt.tight_layout()
+            plt.savefig('../output/fig_mh_traceplot_energies.png')
             plt.show()
 
             # Inspect correlation of energies.
@@ -655,7 +685,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
     else:
         print('Method not recognized.')
 
-    return y_tildes, energies, energies_prediffusion, energy_estimation_errors
+    return y_tildes, energies, energy_estimation_errors
 
 
 # ----------------
