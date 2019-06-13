@@ -445,7 +445,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         # Start with copy of optimal support points, then diffuse until
         # energy(true, copy) is at least e_tilde.
 
-        MAX_COUNT_DIFFUSION = 1e5
+        MAX_COUNT_DIFFUSION = 1e6
         
         y_tildes = np.zeros((num_y_tildes, y_opt.shape[0], y_opt.shape[1]))
         energies = np.zeros(num_y_tildes)
@@ -461,19 +461,20 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             else:
                 e_tilde = np.random.exponential(
                     scale=2. * energy_sensitivity / alpha)
-            print('Exp. mean: {:.5f}, e_tilde: {:.5f}'.format(2. * energy_sensitivity / alpha,
-                                                              e_tilde))
+            exp_mean = 2. * energy_sensitivity / alpha
+            print('\nExp. mean: {:.5f}, e_tilde: {:.5f}'.format(exp_mean, e_tilde))
             
             # Adjust step size depending on e_tilde.
             #if e_tilde > energy_sensitivity:
-            factor = e_tilde / energy_sensitivity
-            
-            if factor > 1:
-                factor *= 5
+            factor = e_tilde / exp_mean
+            factor = factor if factor <= 1 else 0.5 * factor
+            #if factor > 1:
+            #    factor *= 5
             #elif factor > 10:
-            #    factor *= 20
-            else:
-                factor *= 2
+            #    factor *= 10
+            #else:
+            #    factor *= 1
+            
             step_size_adjusted = step_size * factor
             print('  step_size_factor: {:.5f}, adjusted: {} -> {:.5f}'.format(
                 factor, step_size, step_size_adjusted))
@@ -745,16 +746,8 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
         return lik, lik_per_gaussian
 
     if do_log:
-        # OLD
-        #likelihood = sum([np.log(pt_likelihood(pt)) for pt in x])
-        
-        # NEW
-        #likelihood = sum([np.log(pt_likelihood(pt)[0]) for pt in x])
-        
-        
-        # ---------------------------
-        # NEW WITH TROUBLESHOOTING.
-        
+        print('\n-----------------------------\n')
+
         gmm_component_liks = []
         liks = []
         lliks = []
@@ -785,8 +778,8 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
         high = np.max(gmm_component_liks)
         plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
             tag, len(x), bandwidth))
-        plt.xlabel('gmm components, sorted by lik')
-        plt.ylabel('lik')
+        plt.xlabel('gmm components, sorted by lik', fontsize=14)
+        plt.ylabel('lik', fontsize=14)
         plt.show()
         
         # Plot histogram of point likelihoods.
@@ -836,22 +829,32 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
 
 def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
                                  STEP_SIZE, ALPHA, BANDWIDTH, SAMPLE_SIZE,
-                                 mus=None, weights=None, sigma_data=None,
-                                 plot=False):
+                                 plot=False, tag='', diffusion_mean=False):
     """Samples one full-size data set, given a bandwidth.
 
     Args:
-      ... args from earlier ...
+      e_opt: Energy distance between optimal support points and data.
+      energy_sensitivity: Sensitivity, based on user-selected privacy budget.
+      x: NumPy array, data.
+      y_opt: NumPy array, optimal support points.
+      step_size: Float, amount to step in diffusion or MH.
+      alpha: Float, privacy budget.
+      bandwidth: Float, standard deviation of kernel density estimator.
+      sample_size: Int, size of expanded sample.
+      plot: Boolean, whether to plot.
+      tag: String, names plot file.
+      diffusion_mean: Picks mean instead of sampling from Exponential.
 
     Return:
       y_tilde: NumPy array of sampled, private support points.
-      full_sample: NumPy array of kernel density expansion of y_tilde.
+      y_tilde_upsampled: NumPy array of upsampled points before adding noise.
+      y_tilde_expansion: NumPy array of upsampled points after adding noise.
     """
 
-    ys, es, _, _ = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
-                                   'diffusion', STEP_SIZE, 1, alpha=ALPHA)
+    ys, es, _ = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
+                                   'diffusion', STEP_SIZE, 1, alpha=ALPHA,
+                                   diffusion_mean=diffusion_mean)
     y_tilde = ys[0]
-    energy_y_y_tilde = es[0]
 
     # Sample from mixture model centered on noisy support points.
     choices = np.random.choice(range(len(y_tilde)), size=SAMPLE_SIZE)
@@ -860,6 +863,7 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
         y_tilde_upsampled + np.random.normal(0, BANDWIDTH,
                                              size=(SAMPLE_SIZE, x.shape[1])))
     y_tilde_expansion = y_tilde_upsampled_with_noise
+    y_tilde_expansion = np.clip(y_tilde_expansion, 0, 1)
     
     # Optionally plot results.
     if plot:
@@ -869,15 +873,17 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
         plt.scatter(y_tilde_expansion[:, 0], y_tilde_expansion[:, 1], c='blue', 
                     alpha=0.3, label='FULL')
 
-        plt.title('Diffusion, and PRE-SELECTED w = {:.5f}'.format(BANDWIDTH))
-        plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-        #plt.xlim(0, 1)
-        #plt.ylim(0, 1)
+        #plt.title('Diffusion, and PRE-SELECTED w = {:.5f}'.format(BANDWIDTH))
+        #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
         plt.gca().set_aspect('equal', adjustable='box')
+        plt.tight_layout()
+        plt.savefig('../output/fig_kde.png')
         plt.show()
 
 
-    return y_tilde, y_tilde_upsampled, y_tilde_expansion, energy_y_y_tilde
+    return y_tilde, y_tilde_upsampled, y_tilde_expansion
 
 
 def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2, 
@@ -1012,7 +1018,7 @@ def scatter_and_hist(x, y_all):
     # Make scatter plot:
     ax_scatter.scatter(plot_x1, plot_x2, color='gray', alpha=0.3,
                        label='data', s=128)
-    ax_scatter.scatter(plot_y1, plot_y2, color='green', alpha=0.3,
+    ax_scatter.scatter(plot_y1, plot_y2, color='limegreen', alpha=0.3,
                        label='sample', s=32)
     #ax_scatter.set_xlim((0, 1))
     #ax_scatter.set_ylim((0, 1))
@@ -1021,12 +1027,12 @@ def scatter_and_hist(x, y_all):
     # Make histograms.
     ax_histx.hist(plot_x1, bins=20, alpha=0.3, color='gray', label='data',
                   density=True)
-    ax_histx.hist(plot_y1, bins=20, alpha=0.3, color='green', label='sample',
+    ax_histx.hist(plot_y1, bins=20, alpha=0.3, color='limegreen', label='sample',
                   density=True)
     ax_histy.hist(plot_x2, bins=20, alpha=0.3, orientation='horizontal',
                   color='gray', label='data', density=True)
     ax_histy.hist(plot_y2, bins=20, alpha=0.3, orientation='horizontal',
-                  color='green', label='sample', density=True)
+                  color='limegreen', label='sample', density=True)
     ax_histx.set_xlim(ax_scatter.get_xlim())
     ax_histy.set_ylim(ax_scatter.get_ylim())
     ax_histx.legend()
@@ -1079,7 +1085,7 @@ def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
         xe = x[:, element]
         xe_mean = np.mean(xe)
         ye_means = [np.mean(y, axis=0)[element] for y in y_opt_all]
-        plt.hist(ye_means, density=True, color='green', label='estimate',
+        plt.hist(ye_means, density=True, color='limegreen', label='estimate',
                  alpha=0.3)
         plt.axvline(x=xe_mean, color='gray', label='data')
         plt.legend()
