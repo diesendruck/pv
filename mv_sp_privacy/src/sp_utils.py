@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pdb
+from scipy.spatial.distance import pdist
 import sys
 import tensorflow as tf
 import time
@@ -12,8 +13,9 @@ from scipy.stats import multivariate_normal
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
                        Y_INIT_OPTION='radial', clip='bounds', do_wlb=False,
-                       plot=True):
+                       plot=True, do_mmd=False, mmd_sigma=None):
     """Initializes and gets support points.
+    
     Args:
       x: Data. ND numpy array of any length, e.g. (100, dim).
       num_support: Scalar.
@@ -24,13 +26,15 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
         are [0,1].
       do_wlb: Boolean, chooses to use Exponential random weight for 
         each data point.
+      do_mmd: Boolean, chooses MMD instead of energy distance.
+      mmd_sigma: Float, bandwidth of MMD kernel.
 
     Returns:
       y_opt: (max_iter,N,D)-array. Trace of generated proposal points.
       e_opt: Float, energy between data and last iteration of y_out.
     """
         
-    print('is_tf: {}, y_init: {}, clip: {}, wlb: {}'.format(
+    print('\nSTARTING RUN. is_tf: {}, y_init: {}, clip: {}, wlb: {}'.format(
         is_tf, Y_INIT_OPTION, clip, do_wlb))
     
     # Initialize generated particles for both sets (y and y_).
@@ -69,6 +73,8 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
                                            save_iter=[max_iter - 1],
                                            clip=clip,
                                            do_wlb=do_wlb,
+                                           do_mmd=do_mmd,
+                                           mmd_sigma=mmd_sigma,
                                            plot=plot)
 
     # Get last updated set as support points.
@@ -79,8 +85,10 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
 def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                             is_tf=False, energy_power=2., save_iter=[100],
-                            clip='bounds', do_wlb=None, plot=True):
+                            clip='bounds', do_wlb=False, do_mmd=False,
+                            mmd_sigma=None, plot=True):
     """Runs TensorFlow optimization, n times through proposal points.
+    
     Args:
       data: ND numpy array of any length, e.g. (100, dim).
       gen: ND numpy array of any length, e.g. (10, dim).
@@ -91,24 +99,30 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
         are [0,1].
       do_wlb: Boolean, chooses to use Exponential random weight for 
         each data point.
+      do_mmd: Boolean, chooses MMD instead of energy distance.
+      mmd_sigma: Float, bandwidth of MMD kernel.
+      
 
     Returns:
       y_opt: (max_iter,N,D)-array. Trace of generated proposal points.
       e_opt: Float, energy between data and last iteration of y_out.
     """
     
+    # For MMD, must supply sigma.
+    if do_mmd:
+        assert mmd_sigma is not None, 'If using MMD, must supply mmd_sigma.'
+    
+    # Create WLB weights.
     if do_wlb:
         # Create (M,1) NumPy array with Exponential random weight for each data point.
         exp_weights = np.random.exponential(scale=1,
                                             size=(data.shape[0], 1)).astype(np.float32)
-        #exp_weights /= np.sum(exp_weights)
-        #assert np.abs(np.sum(exp_weights) - 1) < 1e-5, 'exponential weights must sum to one'
     else:
         exp_weights = None
 
     # Set up TensorFlow optimization.
     if is_tf:
-        print('\n  [*] Using TensorFlow optimization.')
+        print('  [*] Using TensorFlow optimization.')
         
         # Set up container for results.
         y_out = np.zeros((max_iter, gen.shape[0], gen.shape[1]))
@@ -119,12 +133,14 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                                        name='input_data')
         tf_candidate_sp = tf.Variable(gen, name='sp', dtype=tf.float32)
 
-        tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=energy_power,
-                             is_tf=True, weights=exp_weights)
+        if do_mmd:
+            tf_e_out, _ = mmd(tf_input_data, tf_candidate_sp, sigma=mmd_sigma,
+                              is_tf=True, weights=exp_weights)
+        else:
+            tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=energy_power,
+                                 is_tf=True, weights=exp_weights)
 
-        #opt = tf.train.GradientDescentOptimizer(learning_rate)
         opt = tf.train.AdamOptimizer(learning_rate)
-        #opt = tf.train.RMSPropOptimizer(learning_rate)
         tf_grads, tf_variables = zip(*opt.compute_gradients(tf_e_out))
         tf_optim = opt.apply_gradients(zip(tf_grads, tf_variables))
 
@@ -151,6 +167,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     {tf_input_data: data})
                 sess.run([tf_optim], {tf_input_data: data})
                 
+                
                 """ Batch most of the time, then Full on save.
                 if it in save_iter:
                     # Do update over entire data set. [TAKES LONGER]
@@ -166,15 +183,15 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                         {tf_input_data: batch_data})
                     sess.run([tf_optim], {tf_input_data: batch_data})
                 """
+                
 
-                # -------------------------------------------------------------
                 # TODO: Decide whether to clip support points to domain bounds.
                 if clip == 'bounds':
                     sp_ = np.clip(sp_, 0, 1)
                 elif clip == 'data':
                     sp_ = np.clip(sp_, np.min(data), np.max(data))
-                # -------------------------------------------------------------
 
+                    
                 # Store result in container.
                 y_out[it, :] = sp_
 
@@ -206,19 +223,26 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     plt.gca().set_aspect('equal', adjustable='box')
                     plt.show()
                     
-            print('Time elapsed: {}'.format(time.time() - start_time))
-                    
+            print('  [*] Time elapsed: {}'.format(time.time() - start_time))
+    
+    
     # Set up NumPy optimization.
     elif not is_tf:
-        print('\n  [*] Using analytical gradient optimization.')
+        print('  [*] Using analytical gradient optimization.')
         
         # Set up container for results.
         y_out = np.zeros((max_iter, gen.shape[0], gen.shape[1]))
 
         # Run optimization steps.
         for it in range(max_iter):
-            e_, e_grads = energy(data, gen, power=energy_power)
-            gen -= learning_rate * e_grads
+            
+            # Compute distance and return value and gradients.
+            if do_mmd:
+                e_, e_grads = mmd(data, gen, sigma=mmd_sigma)
+                gen -= learning_rate * e_grads
+            else:
+                e_, e_grads = energy(data, gen, power=energy_power)
+                gen -= learning_rate * e_grads
 
             # -----------------------------------------------------------------
             # TODO: Decide whether to clip support points to domain bounds.
@@ -253,6 +277,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                 #plt.ylim(0, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
                 plt.show()
+    
 
     return y_out, e_
 
@@ -275,9 +300,59 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
     """
     assert power >= 1, 'Power must be >= 1.'
 
+    # ------------- TensorFlow VERSION -------------
+
+    if is_tf:
+        x = data
+        y = gen
+        dim = tf.shape(x)[1]
+        data_num = tf.shape(x)[0]
+        gen_num = tf.shape(y)[0]
+
+        # Compute energy.
+        v = tf.concat([x, y], 0)
+        v_tiled_across = tf.tile(tf.expand_dims(v, 1), [1, tf.shape(v)[0], 1])
+        v_tiled_down = tf.tile(tf.expand_dims(v, 0), [tf.shape(v)[0], 1, 1])
+        pairwise_difs = v_tiled_across - v_tiled_down
+
+        # TODO: WHY IS THIS NEEDED TO AVOID NANs?
+        # Replace diagonals (which are zeros) with small value.
+        # Compute K (norm of pairwise differences) with filler on diagonal,
+        #   then zero out diagonal.
+        diag_filler = 1e-10 * tf.eye(tf.shape(pairwise_difs)[0])
+        diag_filler = tf.tile(
+            tf.expand_dims(diag_filler, 2),
+            [1, 1, tf.shape(pairwise_difs)[2]])
+        pairwise_difs = pairwise_difs + diag_filler
+
+        # Build kernel matrix using norms of pairwise difs.
+        
+        
+        # Build kernel matrix, and optionally multiple by data weights.
+        K = tf.norm(pairwise_difs, axis=2, ord=power)
+        K = tf.matrix_set_diag(K, tf.zeros(tf.shape(v)[0]))  # Zero-out diagonal.
+        if weights is not None:
+            weights = tf.constant(weights)
+            p1_gen_num_weights = tf.tile(weights, (1, gen_num))
+            K_xy = K[:data_num, data_num:] * p1_gen_num_weights
+        else:
+            K_xy = K[:data_num, data_num:]
+        K_xx = K[:data_num, :data_num]
+        K_yy = K[data_num:, data_num:]
+
+        m = tf.cast(data_num, tf.float32)
+        n = tf.cast(gen_num, tf.float32)
+
+        e = (2. / n / m * tf.reduce_sum(K_xy) -
+             1. / m / m * tf.reduce_sum(K_xx) -
+             1. / n / n * tf.reduce_sum(K_yy))
+
+        gradients_e = None
+    
+    
     # ------------- NumPy VERSION -------------
 
-    if not is_tf:
+    else:
         x = data
         y = gen
         dim = x.shape[1]
@@ -289,31 +364,26 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
         v_tiled_across = np.tile(v[:, np.newaxis, :], (1, v.shape[0], 1))
         v_tiled_down = np.tile(v[np.newaxis, :, :], (v.shape[0], 1, 1))
         pairwise_difs = v_tiled_across - v_tiled_down
-        K = np.linalg.norm(pairwise_difs, axis=2, ord=power)
 
         # Build kernel matrix, and optionally multiple by data weights.
+        K = np.linalg.norm(pairwise_difs, axis=2, ord=power)
         if weights is not None:
-            p1_weights = np.tile(weights, (1, data_num))
-            p2_weights = np.transpose(p1_weights)
-            K_xx = K[:data_num, :data_num] # TODO: * p1_weights * p2_weights
-            K_xy = K[:data_num, data_num:] * np.tile(weights, (1, gen_num))
+            p1_gen_num_weights = np.tile(weights, (1, gen_num))
+            K_xy = K[:data_num, data_num:] * p1_gen_num_weights
         else:
-            K_xx = K[:data_num, :data_num]
-            K_yy = K[data_num:, data_num:]
-        K_xy = K[:data_num, data_num:]
+            K_xy = K[:data_num, data_num:]
+        K_xx = K[:data_num, :data_num]
+        K_yy = K[data_num:, data_num:]
 
         e = (2. / gen_num / data_num * np.sum(K_xy) -
              1. / data_num / data_num * np.sum(K_xx) -
              1. / gen_num / gen_num * np.sum(K_yy))
             
-        # Compute energy gradients.
-        
         
         # TODO: COMPUTE GRADIENTS FOR WEIGHTED DATA.
         if weights is not None:
-            print('NOTE: Gradients for weighted data not yet implemented')
+            print('[*] Analytical gradients for weighted data not yet implemented')
             sys.exit()
-        
         
         # Note: Term2 assumes y in first position. For y in second position,
         #       need to multiply grad_matrix by -1.
@@ -343,71 +413,104 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
                                                        axis=0))
             gradients_e[i] = grad_yi
 
+
+    return e, gradients_e
+
+
+def mmd(data, gen, sigma=1., is_tf=False, weights=None):
+    """Computes MMD between NumPy arrays.
+
+    The smaller the value, the closer the sets.
+    
+    Args:
+      data: ND NumPy array of any length, e.g. (1000, 2).
+      gen: ND NumPy array of any length, e.g. (10, 2).
+      sigma: Float, kernel bandwidth.
+      is_tf: Boolean. Selects for TensorFlow functions.
+      weights: (M,1) NumPy array with random weight for each data point.
+    
+    Returns:
+      mmd: Scalar, the MMD between the sets.
+      gradients_mmd: NumPy array of MMD gradients for each generated point.
+    """
+    print('  [*] Analytical gradients not yet implemented for MMD.')
+    
+    x = data
+    y = gen
+        
     # ------------- TensorFlow VERSION -------------
 
-    elif is_tf:
-        x = data
-        y = gen
+    if is_tf:
         dim = tf.shape(x)[1]
         data_num = tf.shape(x)[0]
         gen_num = tf.shape(y)[0]
-
-        # Compute energy.
-        v = tf.concat([x, y], 0)
-        v_tiled_across = tf.tile(tf.expand_dims(v, 1), [1, tf.shape(v)[0], 1])
-        v_tiled_down = tf.tile(tf.expand_dims(v, 0), [tf.shape(v)[0], 1, 1])
-        pairwise_difs = v_tiled_across - v_tiled_down
-
-        # TODO: WHY IS THIS NEEDED TO AVOID NANs?
-        # Replace diagonals (which are zeros) with small value.
-        # Compute K (norm of pairwise differences) with filler on diagonal,
-        #   then zero out diagonal.
-        diag_filler = 1e-10 * tf.eye(tf.shape(pairwise_difs)[0])
-        diag_filler = tf.tile(
-            tf.expand_dims(diag_filler, 2),
-            [1, 1, tf.shape(pairwise_difs)[2]])
-        pairwise_difs = pairwise_difs + diag_filler
-
-        # Build kernel matrix using norms of pairwise difs.
-        K = tf.norm(pairwise_difs, axis=2, ord=power)
         
-        # Zero-out diagonal.
-        K = tf.matrix_set_diag(K, tf.zeros(tf.shape(v)[0]))
-
+        v = tf.concat([x, y], 0)
+        VVT = tf.matmul(v, tf.transpose(v))
+        v_sq = tf.reshape(tf.diag_part(VVT), [-1, 1])
+        v_sq_tiled = tf.tile(v_sq, [1, v_sq.get_shape().as_list()[0]])
+        v_sq_tiled_T = tf.transpose(v_sq_tiled)
         
         # Build kernel matrix, and optionally multiple by data weights.
+        exp_object = v_sq_tiled - 2 * VVT + v_sq_tiled_T
+        gamma = 1.0 / (2.0 * sigma**2)
+        K = tf.exp(-gamma * exp_object)
         if weights is not None:
             weights = tf.constant(weights)
-            p1_weights = tf.tile(weights, (1, data_num))
-            p2_weights = tf.transpose(p1_weights)
-            p1p2_weights = p1_weights * p2_weights
             p1_gen_num_weights = tf.tile(weights, (1, gen_num))
-            Kw_xx = K[:data_num, :data_num] # TODO: * p1p2_weights
-            Kw_xy = K[:data_num, data_num:] * p1_gen_num_weights
-            K_yy = K[data_num:, data_num:]
-            
-            m = tf.cast(data_num, tf.float32)
-            n = tf.cast(gen_num, tf.float32)
-
-            e = (2. / n / m * tf.reduce_sum(Kw_xy) -
-                 1. / m / m * tf.reduce_sum(Kw_xx) -
-                 1. / n / n * tf.reduce_sum(K_yy))
-            
+            K_xy = K[:data_num, data_num:] * p1_gen_num_weights            
         else:
-            K_xx = K[:data_num, :data_num]
             K_xy = K[:data_num, data_num:]
-            K_yy = K[data_num:, data_num:]
+        K_xx = K[:data_num, :data_num]
+        K_yy = K[data_num:, data_num:]
+            
+        m = tf.cast(data_num, tf.float32)
+        n = tf.cast(gen_num, tf.float32)
 
-            m = tf.cast(data_num, tf.float32)
-            n = tf.cast(gen_num, tf.float32)
+        mmd = (1. / m / m * tf.reduce_sum(K_xx) +
+               1. / n / n * tf.reduce_sum(K_yy) -
+               2. / m / n * tf.reduce_sum(K_xy))
+        
+        # TODO: MMD gradients.
+        gradients_mmd = None
+        
+        return mmd, gradients_mmd
 
-            e = (2. / n / m * tf.reduce_sum(K_xy) -
-                 1. / m / m * tf.reduce_sum(K_xx) -
-                 1. / n / n * tf.reduce_sum(K_yy))
+    
+    # ------------- NumPy VERSION -------------
 
-        gradients_e = None
+    elif not is_tf:
+        data_num = len(x)
+        gen_num = len(y)
 
-    return e, gradients_e
+        if len(x.shape) == 1:
+            x = np.reshape(x, [-1, 1])
+            y = np.reshape(y, [-1, 1])
+        v = np.concatenate((x, y), 0)
+        VVT = np.matmul(v, np.transpose(v))
+        sqs = np.reshape(np.diag(VVT), [-1, 1])
+        sqs_tiled_horiz = np.tile(sqs, np.transpose(sqs).shape)
+        
+        # Build kernel matrix, and optionally multiple by data weights.
+        exp_object = sqs_tiled_horiz - 2 * VVT + np.transpose(sqs_tiled_horiz)
+        gamma = 1.0 / (2.0 * sigma**2)
+        K = np.exp(-gamma * exp_object)
+        if weights is not None:
+            p1_gen_num_weights = np.tile(weights, (1, gen_num))
+            K_xy = K[:data_num, data_num:] * p1_gen_num_weights
+        else:
+            K_xy = K[:data_num, data_num:]
+        K_xx = K[:data_num, :data_num]
+        K_yy = K[data_num:, data_num:]
+
+        mmd = (1. / data_num / data_num * np.sum(K_xx) +
+               1. / gen_num / gen_num * np.sum(K_yy) -
+               2. / data_num / gen_num * np.sum(K_xy))
+
+        # TODO: MMD gradients.
+        gradients_mmd = None
+        
+        return mmd, gradients_mmd
 
 
 def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
@@ -689,6 +792,34 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
     return y_tildes, energies, energy_estimation_errors
 
 
+def sample_sp_mmd_dp_bw(x, energy_power, dim, alpha, n, max_iter=5001, lr=5e-4,
+                        plot=True, mean_noise=False):
+    """Compute private support points with MMD and private bandwidth.
+    """
+    median_pairwise_dists = np.median(pdist(x, 'minkowski', p=energy_power))
+    sensitivity_median_pairwise_dists = dim ** (1. / energy_power) / 2.
+    
+    if mean_noise:
+        private_median = (median_pairwise_dists +
+                          sensitivity_median_pairwise_dists / alpha)
+    else:
+        private_median = (median_pairwise_dists +
+                          np.random.laplace(
+                              scale=sensitivity_median_pairwise_dists / alpha))
+    
+    temp_y_opt_mmd, temp_mmd_opt = get_support_points(x, n, max_iter, lr,
+                                                      is_tf=True,
+                                                      plot=plot,
+                                                      do_mmd=True,
+                                                      mmd_sigma=private_median)
+
+    print('  [*] Alpha: {:.4f}, True median: {:.4f}, Sampled: {:.4f}'.format(
+        alpha, median_pairwise_dists, private_median))
+
+    return temp_y_opt_mmd, temp_mmd_opt
+
+
+
 # ----------------
 # TODO: DEPRECATE.
 def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
@@ -745,81 +876,67 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
         lik = 1. / len(gaussians) * sum(lik_per_gaussian)
         return lik, lik_per_gaussian
 
-    if do_log:
-        print('\n-----------------------------\n')
-
-        gmm_component_liks = []
-        liks = []
-        lliks = []
-        for pt in x:
-            lik, lik_per_gaussian = pt_likelihood(pt)
-            
-            try:
-                liks.append(lik)
-                lliks.append(np.log(lik))
-            except:
-                #pdb.set_trace()
-                pass
-            sort_lik = sorted(lik_per_gaussian, reverse=True)
-            gmm_component_liks.append(sort_lik)
+    gmm_component_liks = []
+    liks = []
+    lliks = []
+    for pt in x:
+        lik, lik_per_gaussian = pt_likelihood(pt)
+        
+        try:
+            liks.append(lik)
+            lliks.append(np.log(lik))
+        except:
+            pass
+        sort_lik = sorted(lik_per_gaussian, reverse=True)
+        gmm_component_liks.append(sort_lik)
             
 
-        prod_liks = np.prod(liks)
-        sum_lliks = np.sum(lliks)
-        likelihood = sum_lliks
+    prod_liks = np.prod(liks)
+    sum_lliks = np.sum(lliks)
+    likelihood = sum_lliks if do_log else prod_liks
         
-        # Plot likelihood of all components for each data point x.
-        gmm_component_liks = np.array(gmm_component_liks)
-        xs = np.arange(gmm_component_liks.shape[1]).reshape(-1)
-        #print(gmm_component_liks)
-        for pt_component_lik in gmm_component_liks:
-            plt.plot(xs, pt_component_lik, marker=".")    
-        low = np.min(gmm_component_liks)
-        high = np.max(gmm_component_liks)
-        plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
-            tag, len(x), bandwidth))
-        plt.xlabel('gmm components, sorted by lik', fontsize=14)
-        plt.ylabel('lik', fontsize=14)
-        plt.show()
+    # Plot likelihood of all components for each data point x.
+    gmm_component_liks = np.array(gmm_component_liks)
+    xs = np.arange(gmm_component_liks.shape[1]).reshape(-1)
+    #print(gmm_component_liks)
+    for pt_component_lik in gmm_component_liks:
+        plt.plot(xs, pt_component_lik, marker=".")    
+    low = np.min(gmm_component_liks)
+    high = np.max(gmm_component_liks)
+    plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
+        tag, len(x), bandwidth))
+    plt.xlabel('gmm components, sorted by lik', fontsize=14)
+    plt.ylabel('lik', fontsize=14)
+    plt.show()
         
-        # Plot histogram of point likelihoods.
+    # Plot histogram of point likelihoods.
 
-        plt.hist(liks)
-        plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
-            bandwidth, prod_liks))
-        plt.show()
-        """        
-        if -np.Inf in lliks:
-            print('lliks contains -Inf. Quintiles: {}'.format(
-                np.percentile(lliks, [0, 20, 40, 60, 80, 100])))
-        else:
-            try:
-                plt.hist(lliks)
-                plt.title('log-likelihoods point-wise, bw={:.5f}, sum_llik={:3.3e}'.format(
-                    bandwidth, sum_lliks))
-                plt.show()
-            except:
-                pdb.set_trace()
-        """
-        
-        print('\t prod_liks={:3.3e},\n\t log_prod_liks={:3.3e},\n\t sum_lliks={:3.3e}\n\n'.format(
-            prod_liks, np.log(prod_liks), sum_lliks))
-        if prod_liks == 0. and np.log(prod_liks) == -np.Inf:
-            pass
-        elif not np.isclose(np.log(prod_liks), sum_lliks):
-            print('\t [!] Check sum_lliks computation')
-            #pdb.set_trace()
-            pass
-
-
-        # ---------------------------
-
-        
-        
+    plt.hist(liks)
+    plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
+        bandwidth, prod_liks))
+    plt.show()
+    """        
+    if -np.Inf in lliks:
+        print('lliks contains -Inf. Quintiles: {}'.format(
+            np.percentile(lliks, [0, 20, 40, 60, 80, 100])))
     else:
-        likelihood = np.prod([pt_likelihood(pt) for pt in x])
-        pdb.set_trace()
-
+        try:
+            plt.hist(lliks)
+            plt.title('log-likelihoods point-wise, bw={:.5f}, sum_llik={:3.3e}'.format(
+                bandwidth, sum_lliks))
+            plt.show()
+        except:
+            pdb.set_trace()
+    """
+        
+    print('\t prod_liks={:3.3e},\n\t log_prod_liks={:3.3e},\n\t sum_lliks={:3.3e}\n\n'.format(
+        prod_liks, np.log(prod_liks), sum_lliks))
+    if prod_liks == 0. and np.log(prod_liks) == -np.Inf:
+        pass
+    elif not np.isclose(np.log(prod_liks), sum_lliks):
+        print('\t [!] Check sum_lliks computation')
+        #pdb.set_trace()
+        pass
 
     if likelihood == np.Inf:
         pdb.set_trace()
@@ -983,7 +1100,7 @@ def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2,
                 plt.show()
 
     time_elapsed = time.time() - time_start
-    print('Time elapsed: {}'.format(time_elapsed))                
+    print('  Time elapsed: {}'.format(time_elapsed))                
                 
     sp = y_out[-1]
 
