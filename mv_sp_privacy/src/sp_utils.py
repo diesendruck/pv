@@ -793,13 +793,13 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 
 
 def sample_sp_mmd_dp_bw(x, energy_power, dim, alpha, n, max_iter=5001, lr=5e-4,
-                        plot=True, mean_noise=False):
+                        plot=False, use_mean=False):
     """Compute private support points with MMD and private bandwidth.
     """
     median_pairwise_dists = np.median(pdist(x, 'minkowski', p=energy_power))
     sensitivity_median_pairwise_dists = dim ** (1. / energy_power) / 2.
     
-    if mean_noise:
+    if use_mean:
         private_median = (median_pairwise_dists +
                           sensitivity_median_pairwise_dists / alpha)
     else:
@@ -850,7 +850,8 @@ def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
 # ----------------
 
 
-def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
+def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
+                             plot=False):
     """Computes likelihood of data set, given cluster centers and bandwidth.
 
     Args:
@@ -859,6 +860,7 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
       bandwidth: Scalar bandwidth of kernels.
       do_log: Boolean, choose to do computations in log scale.
       tag: String, in graph title.
+      plot: Boolean, chooses to plot.
 
     Returns:
       likelihood: Scalar likelihood value for given data set.
@@ -876,9 +878,10 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
         lik = 1. / len(gaussians) * sum(lik_per_gaussian)
         return lik, lik_per_gaussian
 
-    gmm_component_liks = []
     liks = []
     lliks = []
+    gmm_component_liks = []
+    
     for pt in x:
         lik, lik_per_gaussian = pt_likelihood(pt)
         
@@ -890,45 +893,11 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
         sort_lik = sorted(lik_per_gaussian, reverse=True)
         gmm_component_liks.append(sort_lik)
             
-
     prod_liks = np.prod(liks)
     sum_lliks = np.sum(lliks)
     likelihood = sum_lliks if do_log else prod_liks
-        
-    # Plot likelihood of all components for each data point x.
-    gmm_component_liks = np.array(gmm_component_liks)
-    xs = np.arange(gmm_component_liks.shape[1]).reshape(-1)
-    #print(gmm_component_liks)
-    for pt_component_lik in gmm_component_liks:
-        plt.plot(xs, pt_component_lik, marker=".")    
-    low = np.min(gmm_component_liks)
-    high = np.max(gmm_component_liks)
-    plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
-        tag, len(x), bandwidth))
-    plt.xlabel('gmm components, sorted by lik', fontsize=14)
-    plt.ylabel('lik', fontsize=14)
-    plt.show()
-        
-    # Plot histogram of point likelihoods.
-
-    plt.hist(liks)
-    plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
-        bandwidth, prod_liks))
-    plt.show()
-    """        
-    if -np.Inf in lliks:
-        print('lliks contains -Inf. Quintiles: {}'.format(
-            np.percentile(lliks, [0, 20, 40, 60, 80, 100])))
-    else:
-        try:
-            plt.hist(lliks)
-            plt.title('log-likelihoods point-wise, bw={:.5f}, sum_llik={:3.3e}'.format(
-                bandwidth, sum_lliks))
-            plt.show()
-        except:
-            pdb.set_trace()
-    """
-        
+    
+    
     print('\t prod_liks={:3.3e},\n\t log_prod_liks={:3.3e},\n\t sum_lliks={:3.3e}\n\n'.format(
         prod_liks, np.log(prod_liks), sum_lliks))
     if prod_liks == 0. and np.log(prod_liks) == -np.Inf:
@@ -940,12 +909,36 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag=''):
 
     if likelihood == np.Inf:
         pdb.set_trace()
+        
+        
+    if plot:
+        # Plot likelihood of all components for each data point x.
+        gmm_component_liks = np.array(gmm_component_liks)
+        xs = np.arange(gmm_component_liks.shape[1]).reshape(-1)
+        #print(gmm_component_liks)
+        for pt_component_lik in gmm_component_liks:
+            plt.plot(xs, pt_component_lik, marker=".")    
+        low = np.min(gmm_component_liks)
+        high = np.max(gmm_component_liks)
+
+        plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
+            tag, len(x), bandwidth))
+        plt.xlabel('gmm components, sorted by lik', fontsize=14)
+        plt.ylabel('lik', fontsize=14)
+        plt.show()
+
+        # Plot histogram of point likelihoods.
+        plt.hist(liks)
+        plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
+            bandwidth, prod_liks))
+        plt.show()
+
 
     return likelihood, do_log
 
 
 def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
-                                 STEP_SIZE, ALPHA, BANDWIDTH, SAMPLE_SIZE,
+                                 step_size, alpha, bandwidth, sample_size,
                                  plot=False, tag='', diffusion_mean=False):
     """Samples one full-size data set, given a bandwidth.
 
@@ -967,18 +960,17 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
       y_tilde_upsampled: NumPy array of upsampled points before adding noise.
       y_tilde_expansion: NumPy array of upsampled points after adding noise.
     """
-
     ys, es, _ = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
-                                   'diffusion', STEP_SIZE, 1, alpha=ALPHA,
+                                   'diffusion', step_size, 1, alpha=alpha,
                                    diffusion_mean=diffusion_mean)
     y_tilde = ys[0]
 
     # Sample from mixture model centered on noisy support points.
-    choices = np.random.choice(range(len(y_tilde)), size=SAMPLE_SIZE)
+    choices = np.random.choice(range(len(y_tilde)), size=sample_size)
     y_tilde_upsampled = y_tilde[choices]
     y_tilde_upsampled_with_noise = (
-        y_tilde_upsampled + np.random.normal(0, BANDWIDTH,
-                                             size=(SAMPLE_SIZE, x.shape[1])))
+        y_tilde_upsampled + np.random.normal(0, bandwidth,
+                                             size=(sample_size, x.shape[1])))
     y_tilde_expansion = y_tilde_upsampled_with_noise
     y_tilde_expansion = np.clip(y_tilde_expansion, 0, 1)
     
