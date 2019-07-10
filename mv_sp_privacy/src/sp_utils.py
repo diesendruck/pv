@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import pandas as pd
 import pdb
 from scipy.spatial.distance import pdist
 import sys
@@ -64,11 +65,19 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
         y = [[0.5 + 0.25 * np.cos(rad), 0.5 + 0.25 * np.sin(rad)] for
              rad in positions]
         y = np.array(y)
+        
+    elif Y_INIT_OPTION == 'subset':
+        y = x[np.random.randint(len(x), size=num_support)] + np.random.normal(0, 0.001, size=[num_support, x.shape[1]])
+        
+    elif Y_INIT_OPTION == 'uniform':
+        y = np.random.uniform(np.min(x), np.max(x), size=[num_support, x.shape[1]])
+        
+        
 
     # Optimize particles for each dataset (x0 and x1).
     y_opt, e_opt = optimize_support_points(x, y, max_iter=max_iter,
                                            learning_rate=lr, is_tf=is_tf,
-                                           #save_iter=[int(max_iter / 2), max_iter - 1],
+                                           #save_iter=[int(max_iter / 2), max_iter - 1],  # PICK A SAVE_ITER.
                                            #save_iter=[5, 10, 50, 100, max_iter - 1],
                                            save_iter=[max_iter - 1],
                                            clip=clip,
@@ -223,7 +232,13 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     plt.gca().set_aspect('equal', adjustable='box')
                     plt.show()
                     
-            print('  [*] Time elapsed: {}'.format(time.time() - start_time))
+                #elif it in save_iter and it > 0:
+                elif it % 100 == 0 and it > 0:
+                    graph = pd.plotting.scatter_matrix(pd.DataFrame(sp_), figsize=(10,10))
+                    plt.suptitle('SP Optimization. It: {}, e={:.6f}'.format(it, e_))
+                    plt.show()
+                    
+            print('  [*] Time elapsed: {:.2f}'.format(time.time() - start_time))
     
     
     # Set up NumPy optimization.
@@ -535,10 +550,11 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       energies: NumPy array, energies associated with sampled sets.
       energy_estimation_errors: NumPy array, relative error of energy approximation.
     """
-    sensitivity_string = ('\nPr(e) ~ Exp(2U/a) = a / (2U) * exp(- a / (2U) * e)'
-                          ' = Exp(2 * {:.4f} / {:.3f}) = Exp({:.4f})\n'.format(
-                              energy_sensitivity, alpha,
-                              2 * energy_sensitivity / alpha))
+    sensitivity_string = ('\nPr(e) = a / (2U) * exp(- a / (2U) * e) '
+                          '~ Exp(2U/a) = Exp(2 * {:.4f} / {:.3f}) = '
+                          'Exp({:.4f})\n'.format(energy_sensitivity,
+                                                 alpha,
+                                                 2 * energy_sensitivity / alpha))
     print(sensitivity_string)
 
     # Sample support points.
@@ -587,11 +603,14 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             count = 0
 
             while energy_y_y_tilde < e_tilde and count <= MAX_COUNT_DIFFUSION:
-                y_tilde += np.random.normal(0, step_size_adjusted, size=y_tilde.shape)
+                #print(energy(y_opt, y_tilde))
+                #pdb.set_trace()
                 
-                #y_tilde += np.random.normal(0, step_size, size=y_tilde.shape)
-                y_tilde = np.clip(y_tilde, 0, 1)
+                y_tilde += np.random.normal(0, step_size_adjusted, size=y_tilde.shape)
+                #y_tilde = np.clip(y_tilde, 0, 1)
+                y_tilde = np.clip(y_tilde, np.min(x), np.max(x))
 
+                #pdb.set_trace()
                 energy_y_y_tilde, _ = energy(y_opt, y_tilde)
 
                 count += 1
