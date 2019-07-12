@@ -138,8 +138,11 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
         
         # Build TensorFlow graph.
         tf.reset_default_graph()
-        tf_input_data = tf.placeholder(tf.float32, [data.shape[0], data.shape[1]],
+        #tf_input_data = tf.placeholder(tf.float32, [data.shape[0], data.shape[1]],
+        #                               name='input_data')
+        tf_input_data = tf.placeholder(tf.float32, [None, data.shape[1]],
                                        name='input_data')
+        
         tf_candidate_sp = tf.Variable(gen, name='sp', dtype=tf.float32)
 
         if do_mmd:
@@ -166,19 +169,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
             start_time = time.time()
 
             for it in range(max_iter):
-                #batch_size = max(100, gen.shape[0] * 10)
-                #batch_data = data[np.random.choice(len(data), batch_size)]
-                
-                # Do update over entire data set. [TAKES LONGER]
-                data_, sp_, e_, e_grads_, e_vars_ = sess.run(
-                    [tf_input_data, tf_candidate_sp, tf_e_out, tf_grads,
-                     tf_variables],
-                    {tf_input_data: data})
-                sess.run([tf_optim], {tf_input_data: data})
-                
-                
-                """ Batch most of the time, then Full on save.
-                if it in save_iter:
+                if len(data) <= 1000:
                     # Do update over entire data set. [TAKES LONGER]
                     data_, sp_, e_, e_grads_, e_vars_ = sess.run(
                         [tf_input_data, tf_candidate_sp, tf_e_out, tf_grads,
@@ -186,12 +177,14 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                         {tf_input_data: data})
                     sess.run([tf_optim], {tf_input_data: data})
                 else:
+                    batch_size = min(len(data), 500)
+                    batch_data = data[np.random.choice(len(data), batch_size)]             
+                
                     data_, sp_, e_, e_grads_, e_vars_ = sess.run(
                         [tf_input_data, tf_candidate_sp, tf_e_out, tf_grads,
                          tf_variables],
                         {tf_input_data: batch_data})
                     sess.run([tf_optim], {tf_input_data: batch_data})
-                """
                 
 
                 # TODO: Decide whether to clip support points to domain bounds.
