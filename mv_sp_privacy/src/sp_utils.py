@@ -178,7 +178,9 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     sess.run([tf_optim], {tf_input_data: data})
                 else:
                     batch_size = min(len(data), 500)
-                    batch_data = data[np.random.choice(len(data), batch_size)]             
+                    batch_data = data[np.random.choice(len(data),
+                                                       batch_size,
+                                                       replace=False)]             
                 
                     data_, sp_, e_, e_grads_, e_vars_ = sess.run(
                         [tf_input_data, tf_candidate_sp, tf_e_out, tf_grads,
