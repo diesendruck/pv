@@ -169,7 +169,8 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
             start_time = time.time()
 
             for it in range(max_iter):
-                if len(data) <= 1000:
+                max_before_batching = 512
+                if len(data) <= max_before_batching:
                     # Do update over entire data set. [TAKES LONGER]
                     data_, sp_, e_, e_grads_, e_vars_ = sess.run(
                         [tf_input_data, tf_candidate_sp, tf_e_out, tf_grads,
@@ -177,7 +178,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                         {tf_input_data: data})
                     sess.run([tf_optim], {tf_input_data: data})
                 else:
-                    batch_size = min(len(data), 500)
+                    batch_size = min(len(data), max_before_batching)
                     batch_data = data[np.random.choice(len(data),
                                                        batch_size,
                                                        replace=False)]             
@@ -201,6 +202,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
 
                 # Plot occasionally.
                 if (data.shape[1] == 2 and
+                    #it % 100 == 0 and
                     it in save_iter and
                     it > 0 and
                     plot == True
@@ -227,8 +229,8 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     plt.gca().set_aspect('equal', adjustable='box')
                     plt.show()
                     
-                #elif it in save_iter and it > 0:
-                elif it % 100 == 0 and it > 0:
+                #elif it % 100 == 0 and it > 0:
+                elif it in save_iter and it > 0 and plot == True:
                     graph = pd.plotting.scatter_matrix(pd.DataFrame(sp_), figsize=(10,10))
                     plt.suptitle('SP Optimization. It: {}, e={:.6f}'.format(it, e_))
                     plt.show()
