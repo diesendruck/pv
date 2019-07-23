@@ -169,7 +169,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
             start_time = time.time()
 
             for it in range(max_iter):
-                max_before_batching = 512
+                max_before_batching = 64
                 if len(data) <= max_before_batching:
                     # Do update over entire data set. [TAKES LONGER]
                     data_, sp_, e_, e_grads_, e_vars_ = sess.run(
