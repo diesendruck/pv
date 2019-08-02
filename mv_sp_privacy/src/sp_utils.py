@@ -12,6 +12,13 @@ import time
 from scipy.stats import multivariate_normal
 
 
+def scale_01(data):
+    """Scales data to fit in unit cube [0,1]^d."""
+    data -= np.min(data, axis=0)  # Scales to [0, max]
+    data /= np.max(data, axis=0)  # Scales to [0, 1]
+    assert np.min(data) >= 0 and np.max(data) <= 1, 'Scaling incorrect.'
+    return data
+
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
                        Y_INIT_OPTION='radial', clip='bounds', do_wlb=False,
                        plot=True, do_mmd=False, mmd_sigma=None):
@@ -67,19 +74,23 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
         y = np.array(y)
         
     elif Y_INIT_OPTION == 'subset':
-        y = x[np.random.randint(len(x), size=num_support)] + np.random.normal(0, 0.001, size=[num_support, x.shape[1]])
+        y = x[np.random.randint(len(x), size=num_support)] + \
+            np.random.normal(0, 0.001, size=[num_support, x.shape[1]])
         
     elif Y_INIT_OPTION == 'uniform':
         y = np.random.uniform(np.min(x), np.max(x), size=[num_support, x.shape[1]])
         
-        
+    # For MMD, must supply sigma.
+    if do_mmd:
+        assert mmd_sigma is not None, 'If using MMD, must supply mmd_sigma.'
 
     # Optimize particles for each dataset (x0 and x1).
     y_opt, e_opt = optimize_support_points(x, y, max_iter=max_iter,
                                            learning_rate=lr, is_tf=is_tf,
                                            #save_iter=[int(max_iter / 2), max_iter - 1],  # PICK A SAVE_ITER.
                                            #save_iter=[5, 10, 50, 100, max_iter - 1],
-                                           save_iter=[max_iter - 1],
+                                           #save_iter=[max_iter - 1],
+                                           save_iter=200,
                                            clip=clip,
                                            do_wlb=do_wlb,
                                            do_mmd=do_mmd,
@@ -110,16 +121,12 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
         each data point.
       do_mmd: Boolean, chooses MMD instead of energy distance.
       mmd_sigma: Float, bandwidth of MMD kernel.
-      
+      plot: Boolean, to plot or not to plot.
 
     Returns:
       y_opt: (max_iter,N,D)-array. Trace of generated proposal points.
       e_opt: Float, energy between data and last iteration of y_out.
     """
-    
-    # For MMD, must supply sigma.
-    if do_mmd:
-        assert mmd_sigma is not None, 'If using MMD, must supply mmd_sigma.'
     
     # Create WLB weights.
     if do_wlb:
@@ -169,7 +176,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
             start_time = time.time()
 
             for it in range(max_iter):
-                max_before_batching = 64
+                max_before_batching = 256
                 if len(data) <= max_before_batching:
                     # Do update over entire data set. [TAKES LONGER]
                     data_, sp_, e_, e_grads_, e_vars_ = sess.run(
@@ -201,11 +208,11 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                 y_out[it, :] = sp_
 
                 # Plot occasionally.
-                if (data.shape[1] == 2 and
-                    #it % 100 == 0 and
-                    it in save_iter and
-                    it > 0 and
-                    plot == True
+                if (plot == True and
+                    data.shape[1] == 2 and
+                    it % save_iter == 0 and
+                    #it in save_iter and
+                    it > 0
                    ):
                     if it > 0:
                         print('  [*] Overall it/s: {:.4f}'.format(
@@ -229,8 +236,11 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     plt.gca().set_aspect('equal', adjustable='box')
                     plt.show()
                     
-                #elif it % 100 == 0 and it > 0:
-                elif it in save_iter and it > 0 and plot == True:
+                elif (plot == True and
+                      it % save_iter == 0 and
+                      #it in save_iter and
+                      it > 0
+                     ):
                     graph = pd.plotting.scatter_matrix(pd.DataFrame(sp_), figsize=(10,10))
                     plt.suptitle('SP Optimization. It: {}, e={:.6f}'.format(it, e_))
                     plt.show()
@@ -445,7 +455,8 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
       mmd: Scalar, the MMD between the sets.
       gradients_mmd: NumPy array of MMD gradients for each generated point.
     """
-    print('  [*] Analytical gradients not yet implemented for MMD.')
+    
+    #print('  [*] Analytical gradients not yet implemented for MMD.')
     
     x = data
     y = gen
@@ -460,11 +471,20 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
         v = tf.concat([x, y], 0)
         VVT = tf.matmul(v, tf.transpose(v))
         v_sq = tf.reshape(tf.diag_part(VVT), [-1, 1])
-        v_sq_tiled = tf.tile(v_sq, [1, v_sq.get_shape().as_list()[0]])
+        
+        #v_sq_tiled = tf.tile(v_sq, [1, v_sq.get_shape().as_list()[0]])
+        #v_sq_tiled_T = tf.transpose(v_sq_tiled)
+        v_sq_tiled = tf.tile(v_sq, [1, data_num + gen_num])
         v_sq_tiled_T = tf.transpose(v_sq_tiled)
+        
+        #v_sq_tiled = tf.tile(tf.expand_dims(v_sq, 1), [1, tf.shape(v_sq)[0], 1])
+        #v_sq_tiled_T = tf.transpose(v_sq_tiled, [1, 0, 2])
+        
+
         
         # Build kernel matrix, and optionally multiple by data weights.
         exp_object = v_sq_tiled - 2 * VVT + v_sq_tiled_T
+        
         gamma = 1.0 / (2.0 * sigma**2)
         K = tf.exp(-gamma * exp_object)
         if weights is not None:
@@ -525,9 +545,30 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
         return mmd, gradients_mmd
 
 
+def get_energy_sensitivity(data, N, alpha):
+    """Computes energy sensitivity.
+
+    Args:
+        data (array): Data set, from which dimension will be computed.
+        N (int): Number of support points.
+        alpha (float): Privacy budget.
+
+    Returns:
+        energy_sensitivity (float): Sensitivity value.
+    """
+    dim = data.shape[1]
+    ENERGY_POWER = 2
+
+    # Define energy sensitivity for Exponential Mechanism.
+    energy_sensitivity = 2 * dim ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
+    
+    return energy_sensitivity
+    
+
 def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                        step_size=1e-1, num_y_tildes=1, alpha=1., plot=False,
-                       diffusion_mean=False):
+                       diffusion_mean=False, do_mmd=False, mmd_sigma=None,
+                       burnin=1000, thinning=200):
     """Samples in space of support points.
 
     Args:
@@ -541,12 +582,19 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       alpha: Float, privacy budget.
       plot: Boolean, controls plotting.
       diffusion_mean: Picks mean instead of sampling from Exponential.
+      do_mmd: Boolean, chooses MMD instead of energy distance.
+      mmd_sigma: Float, bandwidth of MMD kernel.
+      burnin: Int, number of burned iterations in Metropolis Hastings.
+      thinning: Int, thinning gap in Metropolis Hastings.
 
     Returns:
       y_tildes: NumPy array, sampled support point sets.
       energies: NumPy array, energies associated with sampled sets.
       energy_estimation_errors: NumPy array, relative error of energy approximation.
     """
+    if do_mmd:
+        print('[*] Using MMD as distribution distance.')
+    
     sensitivity_string = ('\nPr(e) = a / (2U) * exp(- a / (2U) * e) '
                           '~ Exp(2U/a) = Exp(2 * {:.4f} / {:.3f}) = '
                           'Exp({:.4f})\n'.format(energy_sensitivity,
@@ -600,15 +648,14 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             count = 0
 
             while energy_y_y_tilde < e_tilde and count <= MAX_COUNT_DIFFUSION:
-                #print(energy(y_opt, y_tilde))
-                #pdb.set_trace()
                 
                 y_tilde += np.random.normal(0, step_size_adjusted, size=y_tilde.shape)
-                #y_tilde = np.clip(y_tilde, 0, 1)
                 y_tilde = np.clip(y_tilde, np.min(x), np.max(x))
 
-                #pdb.set_trace()
-                energy_y_y_tilde, _ = energy(y_opt, y_tilde)
+                if do_mmd:
+                    energy_y_y_tilde, _ = mmd(y_opt, y_tilde, sigma=mmd_sigma)
+                else:
+                    energy_y_y_tilde, _ = energy(y_opt, y_tilde)
 
                 count += 1
 
@@ -671,8 +718,6 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         # Then accept Y_t' with probability min(1, \gamma).
 
         # Choose setup for Metropolis-Hastings.
-        burnin = 1000
-        thinning = 200
         chain_length = burnin + thinning * num_y_tildes
         print('Running chain. Length={}, Burn={}, Thin={}, Step={}'.format(
                 chain_length, burnin, thinning, step_size))
@@ -680,7 +725,11 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         # Initialize the support points Y_t.
         # y_t = np.random.uniform(size=y_opt.shape)
         y_t = y_opt  # + np.random.normal(scale=0.1, size=y_opt.shape)
-        energy_init, _ = energy(y_opt, y_t)
+        
+        if do_mmd:
+            energy_init, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
+        else:
+            energy_init, _ = energy(y_opt, y_t)
 
         # Create containers for markov chain results.
         y_mh = np.zeros(shape=(chain_length, y_opt.shape[0], y_opt.shape[1]))
@@ -699,11 +748,17 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             #y_update_mask = np.tile(
             #    np.round(np.random.uniform(size=[y_t.shape[0], 1])),
             #    [1, y_t.shape[1]])
-            y_t_candidate = y_t + y_update #* y_update_mask
+            #y_t_candidate = y_t + y_update * y_update_mask
+            y_t_candidate = y_t + y_update
             
             y_t_candidate = np.clip(y_t_candidate, 0, 1)
-            energy_t, _ = energy(y_opt, y_t)
-            energy_t_candidate, _ = energy(y_opt, y_t_candidate)
+            
+            if do_mmd:
+                energy_t, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
+                energy_t_candidate, _ = mmd(y_opt, y_t_candidate, sigma=mmd_sigma)
+            else:
+                energy_t, _ = energy(y_opt, y_t)
+                energy_t_candidate, _ = energy(y_opt, y_t_candidate)
 
             # Compute the acceptance ratio.
             # With U = 2 * DIM ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
@@ -737,7 +792,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 
             
             # Plot the points.
-            if plot and i % (thinning * 10) == 0:
+            if plot and i % int(chain_length / 10) == 0:
                 plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
                             label='data')
                 plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
@@ -811,17 +866,27 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
 def sample_sp_mmd_dp_bw(x, energy_power, dim, alpha, n, max_iter=5001, lr=5e-4,
                         plot=False, use_mean=False):
     """Compute private support points with MMD and private bandwidth.
+    
+    Sensitivity is of the median of pairwise distances, which can be the
+    span of the hypercube.
     """
     median_pairwise_dists = np.median(pdist(x, 'minkowski', p=energy_power))
-    sensitivity_median_pairwise_dists = dim ** (1. / energy_power) / 2.
+    sensitivity = dim ** (1. / energy_power) / 2.
+    
+    truth = median_pairwise_dists
+    plus_minus_one = 2 * np.random.binomial(1, p=0.5) - 1 
+    noise_mean = plus_minus_one * sensitivity / alpha
+    noise_natural = np.random.laplace(scale=sensitivity / alpha)
     
     if use_mean:
-        private_median = (median_pairwise_dists +
-                          sensitivity_median_pairwise_dists / alpha)
+        private_median = truth + noise_mean
+        if private_median <= 0:
+            # Assign arbitrary floor.
+            private_median = max(private_median, 1e-6)
+            print('Private median was negative, assigned 1e-6.')
     else:
-        private_median = (median_pairwise_dists +
-                          np.random.laplace(
-                              scale=sensitivity_median_pairwise_dists / alpha))
+        private_median = truth + noise_natural
+    assert private_median > 0, 'Private median must be > 0.'
     
     temp_y_opt_mmd, temp_mmd_opt = get_support_points(x, n, max_iter, lr,
                                                       is_tf=True,
@@ -953,9 +1018,10 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
     return likelihood, do_log
 
 
-def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
-                                 step_size, alpha, bandwidth, sample_size,
-                                 plot=False, tag='', diffusion_mean=False):
+def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
+                                    step_size, alpha, bandwidth,
+                                    sample_size, plot=False, tag='',
+                                    method='mh', diffusion_mean=False):
     """Samples one full-size data set, given a bandwidth.
 
     Args:
@@ -969,6 +1035,7 @@ def sample_full_set_by_diffusion(e_opt, energy_sensitivity, x, y_opt,
       sample_size: Int, size of expanded sample.
       plot: Boolean, whether to plot.
       tag: String, names plot file.
+      method: String, ['diffusion', 'mh'].
       diffusion_mean: Picks mean instead of sampling from Exponential.
 
     Return:
