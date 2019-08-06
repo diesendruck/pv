@@ -545,13 +545,12 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
         return mmd, gradients_mmd
 
 
-def get_energy_sensitivity(data, N, alpha):
+def get_energy_sensitivity(data, N):
     """Computes energy sensitivity.
 
     Args:
         data (array): Data set, from which dimension will be computed.
         N (int): Number of support points.
-        alpha (float): Privacy budget.
 
     Returns:
         energy_sensitivity (float): Sensitivity value.
@@ -568,7 +567,7 @@ def get_energy_sensitivity(data, N, alpha):
 def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                        step_size=1e-1, num_y_tildes=1, alpha=1., plot=False,
                        diffusion_mean=False, do_mmd=False, mmd_sigma=None,
-                       burnin=1000, thinning=200):
+                       burnin=1000, thinning=1000, partial_update=True):
     """Samples in space of support points.
 
     Args:
@@ -586,6 +585,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       mmd_sigma: Float, bandwidth of MMD kernel.
       burnin: Int, number of burned iterations in Metropolis Hastings.
       thinning: Int, thinning gap in Metropolis Hastings.
+      partial_update: Boolean, in MH do random walk only on a random subset.
 
     Returns:
       y_tildes: NumPy array, sampled support point sets.
@@ -745,12 +745,22 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
         for i in range(chain_length):
             # Add random walk noise to current set of support points.
             y_update = np.random.normal(scale=step_size, size=y_t.shape)
-            #y_update_mask = np.tile(
-            #    np.round(np.random.uniform(size=[y_t.shape[0], 1])),
-            #    [1, y_t.shape[1]])
-            #y_t_candidate = y_t + y_update * y_update_mask
-            y_t_candidate = y_t + y_update
+            if partial_update:
+                # Perturb a random subset of points.
+                #y_update_mask = np.tile(
+                #    np.round(np.random.uniform(size=[y_t.shape[0], 1])),
+                #    [1, y_t.shape[1]])
+                #y_t_candidate = y_t + y_update * y_update_mask
+                
+                # Perturb one point at a time.
+                y_update = np.zeros(shape=y_t.shape)
+                y_update[i % len(y_t)] = np.random.normal(scale=step_size, size=y_t[0].shape)
+                y_t_candidate = y_t + y_update
+                
+            else:
+                y_t_candidate = y_t + y_update
             
+            # Clip candidate values to data domain of [0,1].
             y_t_candidate = np.clip(y_t_candidate, 0, 1)
             
             if do_mmd:
@@ -811,7 +821,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
                 plt.savefig('../output/fig_mh_sample.png')
                 plt.show()
                 
-                print('Acceptance rate: {}'.format(float(len(accepts)) / (i + 1)))
+                print('Acceptance rate: {:.3f}'.format(float(len(accepts)) / (i + 1)))
                 print('Energy diff: {:.8f}'.format(energy_diff))
 
 
@@ -844,10 +854,10 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
             plt.show()
 
             # Inspect correlation of energies.
-            print('Acceptance ratio: {}'.format(len(accepts) / chain_length))
-            print('percent steps that improved energy score: {}'.format(
+            print('Acceptance rate: {:.3f}'.format(len(accepts) / chain_length))
+            print('percent steps that improved energy score: {:.3f}'.format(
                 sum(ratios_unthinned > 1.) / len(ratios_unthinned)))
-            plt.acorr(energies, maxlags=10)
+            plt.acorr(energies, maxlags=20)
             plt.show()
 
             # Inspect distribution of energies.
