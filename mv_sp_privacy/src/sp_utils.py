@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -234,7 +236,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     #plt.xlim(0, 1)
                     #plt.ylim(0, 1)
                     plt.gca().set_aspect('equal', adjustable='box')
-                    plt.show()
+                    #plt.show()
                     
                 elif (plot == True and
                       it % save_iter == 0 and
@@ -242,8 +244,8 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                       it > 0
                      ):
                     graph = pd.plotting.scatter_matrix(pd.DataFrame(sp_), figsize=(10,10))
-                    plt.suptitle('SP Optimization. It: {}, e={:.6f}'.format(it, e_))
-                    plt.show()
+                    plt.suptitle('SP Optimization. num_supp={}, it={}, e={:.6f}'.format(len(sp_), it, e_))
+                    #plt.show()
                     
             print('  [*] Time elapsed: {:.2f}'.format(time.time() - start_time))
     
@@ -298,7 +300,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                 #plt.xlim(0, 1)
                 #plt.ylim(0, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
-                plt.show()
+                #plt.show()
     
 
     return y_out, e_
@@ -545,29 +547,36 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
         return mmd, gradients_mmd
 
 
-def get_energy_sensitivity(data, N):
+def get_energy_sensitivity(data, num_supp):
     """Computes energy sensitivity.
 
     Args:
         data (array): Data set, from which dimension will be computed.
-        N (int): Number of support points.
+        num_supp (int): Number of support points.
 
     Returns:
         energy_sensitivity (float): Sensitivity value.
     """
     dim = data.shape[1]
-    ENERGY_POWER = 2
+    energy_power = 2
 
     # Define energy sensitivity for Exponential Mechanism.
-    energy_sensitivity = 2 * dim ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
+    energy_sensitivity = 2 * dim ** (1. / energy_power) * (2 * num_supp - 1) / num_supp ** 2
     
     return energy_sensitivity
-    
 
-def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
-                       step_size=1e-1, num_y_tildes=1, alpha=1., plot=False,
-                       diffusion_mean=False, do_mmd=False, mmd_sigma=None,
-                       burnin=1000, thinning=1000, partial_update=True):
+
+def plot_nd(d, w=10, h=10, title=None):
+    graph = pd.plotting.scatter_matrix(pd.DataFrame(d), figsize=(w, h));
+    if title:
+        plt.suptitle(title)
+    #plt.show()
+
+
+def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes=1,
+                       alpha=1., plot=False, diffusion_mean=False, do_mmd=False,
+                       mmd_sigma=None, burnin=5000, thinning=1000, partial_update=True,
+                       save_dir=None):
     """Samples in space of support points.
 
     Args:
@@ -576,7 +585,6 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       x: NumPy array, data.
       y_opt: NumPy array, optimal support points.
       method: String, indicates which sampling method to use.
-      step_size: Float, amount to step in diffusion or MH.
       num_y_tildes: Samples of support points to draw.
       alpha: Float, privacy budget.
       plot: Boolean, controls plotting.
@@ -586,6 +594,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
       burnin: Int, number of burned iterations in Metropolis Hastings.
       thinning: Int, thinning gap in Metropolis Hastings.
       partial_update: Boolean, in MH do random walk only on a random subset.
+      save_dir: String, location to save plots.
 
     Returns:
       y_tildes: NumPy array, sampled support point sets.
@@ -597,278 +606,202 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method,
     
     sensitivity_string = ('\nPr(e) = a / (2U) * exp(- a / (2U) * e) '
                           '~ Exp(2U/a) = Exp(2 * {:.4f} / {:.3f}) = '
-                          'Exp({:.4f})\n'.format(energy_sensitivity,
+                          'Exp({:.8f})\n'.format(energy_sensitivity,
                                                  alpha,
                                                  2 * energy_sensitivity / alpha))
     print(sensitivity_string)
-
-    # Sample support points.
-    if method == 'diffusion':
-
-        # ---------- ALGORITHM 1: DIFFUSE FROM OPTIMAL ----------
-        # Start with copy of optimal support points, then diffuse until
-        # energy(true, copy) is at least e_tilde.
-
-        MAX_COUNT_DIFFUSION = 1e6
         
-        y_tildes = np.zeros((num_y_tildes, y_opt.shape[0], y_opt.shape[1]))
-        energies = np.zeros(num_y_tildes)
-        energy_estimation_errors = np.zeros((num_y_tildes, 2))  # [[energy val, error], ...]
-
-        for i in range(num_y_tildes):
-            # TODO: Must be {larger than optimal energy distance, positive}.
-            # e_tilde = np.abs(np.random.laplace(
-            #     scale=2. * energy_sensitivity / alpha))
-            if diffusion_mean:
-                print('Using diffusion mean:')
-                e_tilde = 2. * energy_sensitivity / alpha
-            else:
-                e_tilde = np.random.exponential(
-                    scale=2. * energy_sensitivity / alpha)
-            exp_mean = 2. * energy_sensitivity / alpha
-            print('\nExp. mean: {:.5f}, e_tilde: {:.5f}'.format(exp_mean, e_tilde))
-            
-            # Adjust step size depending on e_tilde.
-            #if e_tilde > energy_sensitivity:
-            factor = e_tilde / exp_mean
-            factor = factor if factor <= 1 else 0.5 * factor
-            #if factor > 1:
-            #    factor *= 5
-            #elif factor > 10:
-            #    factor *= 10
-            #else:
-            #    factor *= 1
-            
-            step_size_adjusted = step_size * factor
-            print('  step_size_factor: {:.5f}, adjusted: {} -> {:.5f}'.format(
-                factor, step_size, step_size_adjusted))
-            
-            y_tilde = y_opt.copy()
-            energy_y_y_tilde = 0.
-            count = 0
-
-            while energy_y_y_tilde < e_tilde and count <= MAX_COUNT_DIFFUSION:
-                
-                y_tilde += np.random.normal(0, step_size_adjusted, size=y_tilde.shape)
-                y_tilde = np.clip(y_tilde, np.min(x), np.max(x))
-
-                if do_mmd:
-                    energy_y_y_tilde, _ = mmd(y_opt, y_tilde, sigma=mmd_sigma)
-                else:
-                    energy_y_y_tilde, _ = energy(y_opt, y_tilde)
-
-                count += 1
-
-            if count > MAX_COUNT_DIFFUSION:
-                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                            label='data')
-                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                            label='sp(data)')
-                plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7,
-                            label='~sp(data)')
-                plt.title('{}, it: {}, e(Yt, Y*)={:.4f}\n'.format(
-                    method, i, energy_y_y_tilde))
-                #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-                plt.xlim(0, 1)
-                plt.ylim(0, 1)
-                plt.gca().set_aspect('equal', adjustable='box')
-                plt.show()
-                print(('ERROR: Did not reach e_tilde level: {:.6f} < {:.6f}'
-                       '\nIncrease step size or diffusion max_count.').format(
-                    energy_y_y_tilde, e_tilde))
-                sys.exit()
-
-                
-            error = (energy_y_y_tilde - e_tilde) / e_tilde
-
-            print(('  Diffusion count {:5}, e_opt: {:9.6f}, (e(y, y~) - e~) / e~ '
-                   '= error%: ({:5.5f} - {:5.5f}) / {:5.5f} = {:5.5f}').format(
-                       count, e_opt, energy_y_y_tilde, e_tilde, e_tilde, error))
-            
-            
-            # Append the accepted energy value to a list for later analysis.
-            y_tildes[i] = y_tilde
-            energies[i] = energy_y_y_tilde
-            energy_estimation_errors[i] = [energy_y_y_tilde, error]
-            
-            if plot:
-                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                            label='data')
-                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                            label='sp(data)')
-                plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7,
-                            label='~sp(data)')
-                plt.title('{}, it: {}, e(Yt, Y*)={:.4f}\n'.format(
-                    method, i, energy_y_y_tilde))
-                #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-                plt.xlim(0, 1)
-                plt.ylim(0, 1)
-                plt.gca().set_aspect('equal', adjustable='box')
-                plt.show()
-
-                
-    elif method == 'mh':
-
-        # ----------------- ALGORITHM 2: METROPOLIS HASTINGS -----------------
-
-        # Let Y* be optimal support points. Initialize Y_t as Y*. Let
-        # Y_t' = Y_t + random walk noise. For differential privacy level a
-        # and sensitivity U, let acceptance ratio of Y_t' be
-        #   \gamma = exp(a / (2U) * [e(Y_t, Y*) - e(Y_t', Y*)]).
-        # Then accept Y_t' with probability min(1, \gamma).
-
-        # Choose setup for Metropolis-Hastings.
-        chain_length = burnin + thinning * num_y_tildes
-        print('Running chain. Length={}, Burn={}, Thin={}, Step={}'.format(
-                chain_length, burnin, thinning, step_size))
-
-        # Initialize the support points Y_t.
-        # y_t = np.random.uniform(size=y_opt.shape)
-        y_t = y_opt  # + np.random.normal(scale=0.1, size=y_opt.shape)
         
-        if do_mmd:
-            energy_init, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
-        else:
-            energy_init, _ = energy(y_opt, y_t)
+    # --------------------------------------------------------------
+    # Sample support points.     
+    # Let Y* be optimal support points. Initialize Y_t as Y*. Let
+    # Y_t' = Y_t + random walk noise. For differential privacy level a
+    # and sensitivity U, let acceptance ratio of Y_t' be
+    #   \gamma = exp(a / (2U) * [e(Y_t, Y*) - e(Y_t', Y*)]).
+    # Then accept Y_t' with probability min(1, \gamma).
 
-        # Create containers for markov chain results.
-        y_mh = np.zeros(shape=(chain_length, y_opt.shape[0], y_opt.shape[1]))
-        ratios_unthinned = np.zeros(chain_length)
-        energies_unthinned = np.zeros(chain_length)
-        accepts = []
-        
-        # Factor for difference of energies in MH step.
-        diff_factor = alpha / (2. * energy_sensitivity)
-        print('Difference factor: {:.2f}'.format(diff_factor))
+    # Choose setup for Metropolis-Hastings.
+    max_step_size = 0.25 * (np.max(x) - np.min(x))
+    step_size = 1e-3
+    chain_length = burnin + thinning * num_y_tildes
+    print('Running chain. Length={}, Burn={}, Thin={}'.format(
+        chain_length, burnin, thinning))
 
+    # Initialize the support points Y_t.
+    # y_t = np.random.uniform(size=y_opt.shape)
+    y_t = y_opt
 
-        for i in range(chain_length):
-            # Add random walk noise to current set of support points.
-            y_update = np.random.normal(scale=step_size, size=y_t.shape)
-            if partial_update:
-                # Perturb a random subset of points.
-                #y_update_mask = np.tile(
-                #    np.round(np.random.uniform(size=[y_t.shape[0], 1])),
-                #    [1, y_t.shape[1]])
-                #y_t_candidate = y_t + y_update * y_update_mask
-                
-                # Perturb one point at a time.
-                y_update = np.zeros(shape=y_t.shape)
-                y_update[i % len(y_t)] = np.random.normal(scale=step_size, size=y_t[0].shape)
-                y_t_candidate = y_t + y_update
-                
-            else:
-                y_t_candidate = y_t + y_update
-            
-            # Clip candidate values to data domain of [0,1].
-            y_t_candidate = np.clip(y_t_candidate, 0, 1)
-            
-            if do_mmd:
-                energy_t, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
-                energy_t_candidate, _ = mmd(y_opt, y_t_candidate, sigma=mmd_sigma)
-            else:
-                energy_t, _ = energy(y_opt, y_t)
-                energy_t_candidate, _ = energy(y_opt, y_t_candidate)
-
-            # Compute the acceptance ratio.
-            # With U = 2 * DIM ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
-            # 
-            #         exp(- a / (2U) * e_t')
-            # ratio = ---------------------- = exp( a / (2U) * (e_t - e_t'))
-            #         exp(- a / (2U) * e_t)
-            #
-            # As N increases, U decreases, and energy difference is magnified.
-            # Also, as alpha increases, energy difference is magnified.
-            # Therefore, with more support points and higher alpha, energy
-            #   difference is magnified.
-            energy_diff = energy_t - energy_t_candidate
-            ratios_unthinned[i] = np.exp(diff_factor * energy_diff)
-            
-            # print('e_t - e_t\' = {:.5f}, ratio = {:6f}'.format(
-            #       energy_t - energy_t_candidate, ratios_unthinned[i]))
-            # pdb.set_trace()
-
-            # Accept or reject the candidate.
-            if np.random.uniform() < ratios_unthinned[i]:
-                accepts.append(i)
-                accepted_current = True
-                y_t = y_t_candidate
-                y_mh[i] = y_t_candidate
-                energies_unthinned[i] = energy_t_candidate
-            else:
-                accepted_current = False
-                y_mh[i] = y_t
-                energies_unthinned[i] = energy_t
-
-            
-            # Plot the points.
-            if plot and i % int(chain_length / 10) == 0:
-                plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                            label='data')
-                plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                            label='sp(data)')
-                plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
-                            label='~sp(data)')
-                #plt.title(('{}, it: {}, e(Yt, Y*)={:.4f}, '
-                #           'ratio={:.3f}, accepted: {}\n').format(
-                #               method, i, energies_unthinned[i],
-                #               ratios_unthinned[i], accepted_current))
-                #plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-                plt.xlim(0, 1)
-                plt.ylim(0, 1)
-                plt.gca().set_aspect('equal', adjustable='box')
-                plt.tight_layout()
-                plt.savefig('../output/fig_mh_sample.png')
-                plt.show()
-                
-                print('Acceptance rate: {:.3f}'.format(float(len(accepts)) / (i + 1)))
-                print('Energy diff: {:.8f}'.format(energy_diff))
-
-
-        # Thinned results.
-        y_tildes = y_mh[burnin::thinning]
-        ratios = ratios_unthinned[burnin::thinning]
-        energies = energies_unthinned[burnin::thinning]
-        # dups = [y_tildes[i] == y_tildes[i-1] for i in range(1, len(y_tildes))]
-
-        energy_estimation_errors = None
-        
-        # Plot results of markov chain.
-        if plot:
-            # Plot acceptance ratios.
-            plt.plot(ratios)
-            #plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
-            plt.xlabel('Sample', fontsize=14)
-            plt.ylabel('Acceptance ratio', fontsize=14)
-            plt.tight_layout()
-            plt.savefig('../output/fig_mh_acceptance_ratios.png')
-            plt.show()
-            
-            # Plot traceplot of energies.
-            plt.plot(energies)
-            #plt.title('energies, median={:.5f}'.format(np.median(energies)))
-            plt.xlabel('Sample', fontsize=14)
-            plt.ylabel(r'Energy, $e(y, \tilde{y})$', fontsize=14)
-            plt.tight_layout()
-            plt.savefig('../output/fig_mh_traceplot_energies.png')
-            plt.show()
-
-            # Inspect correlation of energies.
-            print('Acceptance rate: {:.3f}'.format(len(accepts) / chain_length))
-            print('percent steps that improved energy score: {:.3f}'.format(
-                sum(ratios_unthinned > 1.) / len(ratios_unthinned)))
-            plt.acorr(energies, maxlags=20)
-            plt.show()
-
-            # Inspect distribution of energies.
-            plt.title('Energies with MH, n={}'.format(len(energies)))
-            plt.hist(energies, bins=20, alpha=0.3)
-            plt.show()
-
-        # --------------------------------------------------------------
-
+    # Choose distance metric, and compute initial value.
+    if do_mmd:
+        energy_t, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
     else:
-        print('Method not recognized.')
+        energy_t, _ = energy(y_opt, y_t)
+
+    # Create containers for markov chain results.
+    y_mh = np.zeros(shape=(chain_length, y_opt.shape[0], y_opt.shape[1]))
+    ratios_unthinned = np.zeros(chain_length)
+    acceptance_rates = np.zeros(chain_length)
+    energies_unthinned = np.zeros(chain_length)
+    accepts = []
+
+    # Factor for difference of energies in MH step.
+    diff_factor = alpha / (2. * energy_sensitivity)
+    print('Difference factor: {:.2f}\n'.format(diff_factor))
+
+    # Store last 100 acceptance rates.
+    trail_len = 50
+    acceptance_rates_trailing = np.zeros(trail_len)
+    
+    
+    # Run chain.
+    for i in range(chain_length):
+        # Add random walk noise to current set of support points.
+        y_update = np.random.normal(scale=step_size, size=y_t.shape)
+        if partial_update:
+            # Perturb a random subset of points.
+            #y_update_mask = np.tile(
+            #    np.round(np.random.uniform(size=[y_t.shape[0], 1])),
+            #    [1, y_t.shape[1]])
+            #y_t_candidate = y_t + y_update * y_update_mask
+
+            # Perturb one point at a time.
+            y_update = np.zeros(shape=y_t.shape)
+            y_update[i % len(y_t)] = np.random.normal(scale=step_size, size=y_t[0].shape)
+            y_t_candidate = y_t + y_update
+
+        else:
+            y_t_candidate = y_t + y_update
+
+
+        # Clip candidate values to data domain of [0,1].
+        y_t_candidate = np.clip(y_t_candidate, 0, 1)
+
+        # Compute metric for current and candidate.
+        if do_mmd:
+            #energy_t, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
+            energy_t_candidate, _ = mmd(y_opt, y_t_candidate, sigma=mmd_sigma)
+        else:
+            #energy_t, _ = energy(y_opt, y_t)
+            energy_t_candidate, _ = energy(y_opt, y_t_candidate)
+
+        # Compute the acceptance ratio.
+        # With U = 2 * DIM ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
+        # 
+        #         exp(- a / (2U) * e_t')
+        # ratio = ---------------------- = exp( a / (2U) * (e_t - e_t'))
+        #         exp(- a / (2U) * e_t)
+        #
+        # As N increases, U decreases, and energy difference is magnified.
+        # Also, as alpha increases, energy difference is magnified.
+        # Therefore, with more support points and higher alpha, energy
+        #   difference is magnified.
+        energy_diff = energy_t - energy_t_candidate
+        ratios_unthinned[i] = np.exp(diff_factor * energy_diff)
+
+        # print('e_t - e_t\' = {:.5f}, ratio = {:6f}'.format(
+        #       energy_t - energy_t_candidate, ratios_unthinned[i]))
+        # pdb.set_trace()
+
+        # Accept or reject the candidate.
+        if np.random.uniform() < ratios_unthinned[i]:    # Accept.
+            accepts.append(i)
+            y_t = y_t_candidate
+            energy_t = energy_t_candidate
+            y_mh[i] = y_t_candidate
+            energies_unthinned[i] = energy_t_candidate
+        else:                                            # Reject.
+            y_mh[i] = y_t
+            energies_unthinned[i] = energy_t
+
+
+        # Adapt step size to keep acceptance rate around 30%.
+        acceptance_rate = float(len(accepts)) / (i + 1)
+        acceptance_rates[i] = acceptance_rate
+        acceptance_rates_trailing[i % trail_len] = acceptance_rate
+        if i % trail_len == trail_len - 1:
+            avg = np.mean(acceptance_rates_trailing)
+            #print('                      trail avg: {:.6f}'.format(avg))
+            #print('s_s: {:.6f}'.format(step_size))
+
+            if avg > 0.4:
+                step_size *= 2
+            elif avg > 0.3 and avg < 0.4:
+                step_size *= 1.2
+            elif avg > 0.2 and avg < 0.3:
+                step_size *= 0.8
+            elif avg < 0.2:
+                step_size *= 0.5
+            step_size = np.clip(step_size, 1e-5, max_step_size)
+            
+        if i % int(chain_length / 20) == 0:
+        #if i == chain_length - 1:
+            print('acceptance_rate={:.8f}, step_size={:.8f}'.format(acceptance_rate, step_size))
+            print('Energy diff: {:.8f}'.format(energy_diff))
+
+
+        # Plot the points.
+        if plot and x.shape[1] == 2 and i % int(chain_length / 10) == 0:
+            plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
+                        label='data')
+            plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
+                        label='sp(data)')
+            plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
+                        label='~sp(data)')
+            plt.xlim(0, 1)
+            plt.ylim(0, 1)
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, 'mh_sample.png'))
+            #plt.show()
+
+        elif plot and x.shape[1] > 2 and i % int(chain_length / 10) == 0:
+            plot_nd(x, title='data')
+            plot_nd(y_mh[i], title='MH ~SP. It: {}, e={:.6f}'.format(i, energies_unthinned[i]))
+
+
+    # Thinned results.
+    y_tildes = y_mh[burnin::thinning]
+    ratios = ratios_unthinned[burnin::thinning]
+    energies = energies_unthinned[burnin::thinning]
+    # dups = [y_tildes[i] == y_tildes[i-1] for i in range(1, len(y_tildes))]
+
+    energy_estimation_errors = None
+
+    # Plot results of markov chain.
+    #if plot:
+    if 1:
+        # Plot acceptance ratios.
+        plt.plot(acceptance_rates)
+        #plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
+        plt.xlabel('Sample', fontsize=14)
+        plt.ylabel('Acceptance rates', fontsize=14)
+        plt.ylim((0,1))
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'mh_acceptance_ratios.png'))
+        plt.show()
+
+        # Plot traceplot of energies.
+        plt.plot(energies_unthinned)
+        #plt.title('energies, median={:.5f}'.format(np.median(energies)))
+        plt.xlabel('Sample', fontsize=14)
+        plt.ylabel(r'Energy, $e(y, \tilde{y})$', fontsize=14)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'mh_traceplot_energies.png'))
+        plt.show()
+
+        # Inspect correlation of energies.
+        print('Acceptance rate: {:.3f}'.format(len(accepts) / chain_length))
+        print('percent steps that improved energy score: {:.3f}'.format(
+            sum(ratios_unthinned > 1.) / len(ratios_unthinned)))
+        #plt.acorr(energies, maxlags=20)
+        #plt.show()
+
+        # Inspect distribution of energies.
+        plt.title('Energies with MH, n={}'.format(len(energies)))
+        plt.hist(energies, bins=20, alpha=0.3)
+        plt.show()
+
+    # --------------------------------------------------------------
 
     return y_tildes, energies, energy_estimation_errors
 
@@ -1016,22 +949,21 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
             tag, len(x), bandwidth))
         plt.xlabel('gmm components, sorted by lik', fontsize=14)
         plt.ylabel('lik', fontsize=14)
-        plt.show()
+        #plt.show()
 
         # Plot histogram of point likelihoods.
         plt.hist(liks)
         plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
             bandwidth, prod_liks))
-        plt.show()
+        #plt.show()
 
 
     return likelihood, do_log
 
 
 def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
-                                    step_size, alpha, bandwidth,
-                                    sample_size, plot=False, tag='',
-                                    method='mh', diffusion_mean=False):
+                                    alpha, bandwidth, sample_size, plot=False,
+                                    tag='', method='mh', diffusion_mean=False):
     """Samples one full-size data set, given a bandwidth.
 
     Args:
@@ -1039,7 +971,6 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
       energy_sensitivity: Sensitivity, based on user-selected privacy budget.
       x: NumPy array, data.
       y_opt: NumPy array, optimal support points.
-      step_size: Float, amount to step in diffusion or MH.
       alpha: Float, privacy budget.
       bandwidth: Float, standard deviation of kernel density estimator.
       sample_size: Int, size of expanded sample.
@@ -1054,7 +985,7 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
       y_tilde_expansion: NumPy array of upsampled points after adding noise.
     """
     ys, es, _ = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
-                                   'diffusion', step_size, 1, alpha=alpha,
+                                   'diffusion', 1, alpha=alpha,
                                    diffusion_mean=diffusion_mean)
     y_tilde = ys[0]
 
@@ -1082,7 +1013,7 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
         plt.gca().set_aspect('equal', adjustable='box')
         plt.tight_layout()
         plt.savefig('../output/fig_kde.png')
-        plt.show()
+        #plt.show()
 
 
     return y_tilde, y_tilde_upsampled, y_tilde_expansion
@@ -1182,7 +1113,7 @@ def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2,
                 #plt.xlim(0, 1)
                 #plt.ylim(0, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
-                plt.show()
+                #plt.show()
 
     time_elapsed = time.time() - time_start
     print('  Time elapsed: {}'.format(time_elapsed))                
@@ -1240,7 +1171,7 @@ def scatter_and_hist(x, y_all):
     ax_histx.legend()
     ax_histy.legend()
 
-    plt.show()
+    #plt.show()
     
     
 def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
@@ -1292,4 +1223,4 @@ def eval_uncertainty(sampling_fn, M, N, DIM, LR, MAX_ITER,
         plt.axvline(x=xe_mean, color='gray', label='data')
         plt.legend()
         plt.title('Marginal mean estimation, element {}'.format(element))
-        plt.show()
+        #plt.show()
