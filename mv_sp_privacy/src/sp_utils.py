@@ -77,7 +77,8 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
         
     elif Y_INIT_OPTION == 'subset':
         y = x[np.random.randint(len(x), size=num_support)] + \
-            np.random.normal(0, 0.001, size=[num_support, x.shape[1]])
+            np.random.normal(0, 0.0001, size=[num_support, x.shape[1]])
+        #y = np.array(x[np.random.randint(len(x), size=num_support)])
         
     elif Y_INIT_OPTION == 'uniform':
         y = np.random.uniform(np.min(x), np.max(x), size=[num_support, x.shape[1]])
@@ -91,8 +92,8 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
                                            learning_rate=lr, is_tf=is_tf,
                                            #save_iter=[int(max_iter / 2), max_iter - 1],  # PICK A SAVE_ITER.
                                            #save_iter=[5, 10, 50, 100, max_iter - 1],
-                                           #save_iter=[max_iter - 1],
-                                           save_iter=200,
+                                           #save_iter=max_iter - 1,
+                                           save_iter=100,
                                            clip=clip,
                                            do_wlb=do_wlb,
                                            do_mmd=do_mmd,
@@ -106,7 +107,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
 
 def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
-                            is_tf=False, energy_power=2., save_iter=[100],
+                            is_tf=False, energy_power=2., save_iter=100,
                             clip='bounds', do_wlb=False, do_mmd=False,
                             mmd_sigma=None, plot=True):
     """Runs TensorFlow optimization, n times through proposal points.
@@ -197,7 +198,6 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                          tf_variables],
                         {tf_input_data: batch_data})
                     sess.run([tf_optim], {tf_input_data: batch_data})
-                
 
                 # TODO: Decide whether to clip support points to domain bounds.
                 if clip == 'bounds':
@@ -236,7 +236,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                     #plt.xlim(0, 1)
                     #plt.ylim(0, 1)
                     plt.gca().set_aspect('equal', adjustable='box')
-                    #plt.show()
+                    plt.show()
                     
                 elif (plot == True and
                       it % save_iter == 0 and
@@ -245,7 +245,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                      ):
                     graph = pd.plotting.scatter_matrix(pd.DataFrame(sp_), figsize=(10,10))
                     plt.suptitle('SP Optimization. num_supp={}, it={}, e={:.6f}'.format(len(sp_), it, e_))
-                    #plt.show()
+                    plt.show()
                     
             print('  [*] Time elapsed: {:.2f}'.format(time.time() - start_time))
     
@@ -300,13 +300,13 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                 #plt.xlim(0, 1)
                 #plt.ylim(0, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
-                #plt.show()
+                plt.show()
     
 
     return y_out, e_
 
 
-def energy(data, gen, power=1., is_tf=False, weights=None):
+def energy(data, gen, power=2., is_tf=False, weights=None, return_k=False):
     """Computes abbreviated energy statistic between two point sets.
 
     The smaller the value, the closer the sets.
@@ -317,10 +317,12 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
       power: Exponent in distance metric. Must be >= 1.
       is_tf: Boolean. Selects for TensorFlow functions.
       weights: (M,1) NumPy array with random weight for each data point.
+      return_k: Boolean, whether to return energy matrix.
     
     Returns:
       e: Scalar, the energy between the sets.
       gradients_e: Numpy array of energy gradients for each proposal point.
+      K: Energy matrix.
     """
     assert power >= 1, 'Power must be >= 1.'
 
@@ -438,7 +440,10 @@ def energy(data, gen, power=1., is_tf=False, weights=None):
             gradients_e[i] = grad_yi
 
 
-    return e, gradients_e
+    if return_k:
+        return e, gradients_e, K
+    else:
+        return e, gradients_e
 
 
 def mmd(data, gen, sigma=1., is_tf=False, weights=None):
@@ -547,7 +552,7 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
         return mmd, gradients_mmd
 
 
-def get_energy_sensitivity(data, num_supp):
+def get_energy_sensitivity(data, num_supp, power=None):
     """Computes energy sensitivity.
 
     Args:
@@ -558,10 +563,9 @@ def get_energy_sensitivity(data, num_supp):
         energy_sensitivity (float): Sensitivity value.
     """
     dim = data.shape[1]
-    energy_power = 2
 
     # Define energy sensitivity for Exponential Mechanism.
-    energy_sensitivity = 2 * dim ** (1. / energy_power) * (2 * num_supp - 1) / num_supp ** 2
+    energy_sensitivity = 2 * dim ** (1. / power) * (2 * num_supp - 1) / num_supp ** 2
     
     return energy_sensitivity
 
@@ -574,9 +578,9 @@ def plot_nd(d, w=10, h=10, title=None):
 
 
 def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes=1,
-                       alpha=1., plot=False, diffusion_mean=False, do_mmd=False,
-                       mmd_sigma=None, burnin=5000, thinning=1000, partial_update=True,
-                       save_dir=None):
+                       alpha=None, plot=False, diffusion_mean=False, do_mmd=False,
+                       mmd_sigma=None, burnin=5000, thinning=2000, partial_update=True,
+                       save_dir=None, power=None):
     """Samples in space of support points.
 
     Args:
@@ -595,6 +599,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
       thinning: Int, thinning gap in Metropolis Hastings.
       partial_update: Boolean, in MH do random walk only on a random subset.
       save_dir: String, location to save plots.
+      power: Int, power in energy metric.
 
     Returns:
       y_tildes: NumPy array, sampled support point sets.
@@ -622,21 +627,22 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
 
     # Choose setup for Metropolis-Hastings.
     max_step_size = 0.25 * (np.max(x) - np.min(x))
-    step_size = 1e-3
+    step_size = 1e-2
     chain_length = burnin + thinning * num_y_tildes
     print('Running chain. Length={}, Burn={}, Thin={}'.format(
         chain_length, burnin, thinning))
 
     # Initialize the support points Y_t.
-    # y_t = np.random.uniform(size=y_opt.shape)
+    #y_t = np.random.uniform(size=y_opt.shape)
     y_t = y_opt
 
     # Choose distance metric, and compute initial value.
     if do_mmd:
-        energy_t, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
+        energy_t, _ = mmd(y_t, y_opt, sigma=mmd_sigma)
     else:
-        energy_t, _ = energy(y_opt, y_t)
+        energy_t, _ = energy(y_t, y_opt, power=power)
 
+        
     # Create containers for markov chain results.
     y_mh = np.zeros(shape=(chain_length, y_opt.shape[0], y_opt.shape[1]))
     ratios_unthinned = np.zeros(chain_length)
@@ -655,35 +661,50 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
     
     # Run chain.
     for i in range(chain_length):
-        # Add random walk noise to current set of support points.
-        y_update = np.random.normal(scale=step_size, size=y_t.shape)
+        
         if partial_update:
-            # Perturb a random subset of points.
-            #y_update_mask = np.tile(
-            #    np.round(np.random.uniform(size=[y_t.shape[0], 1])),
-            #    [1, y_t.shape[1]])
-            #y_t_candidate = y_t + y_update * y_update_mask
-
             # Perturb one point at a time.
-            y_update = np.zeros(shape=y_t.shape)
-            y_update[i % len(y_t)] = np.random.normal(scale=step_size, size=y_t[0].shape)
-            y_t_candidate = y_t + y_update
-
+            update_i = i % len(y_t)
+            y_t_candidate = np.copy(y_t)
+            y_t_candidate[update_i] += np.random.normal(scale=step_size, size=y_t.shape[1])
         else:
+            # Add random walk noise to current set of support points.
+            y_update = np.random.normal(scale=step_size, size=y_t.shape)
             y_t_candidate = y_t + y_update
-
 
         # Clip candidate values to data domain of [0,1].
         y_t_candidate = np.clip(y_t_candidate, 0, 1)
 
-        # Compute metric for current and candidate.
-        if do_mmd:
-            #energy_t, _ = mmd(y_opt, y_t, sigma=mmd_sigma)
-            energy_t_candidate, _ = mmd(y_opt, y_t_candidate, sigma=mmd_sigma)
-        else:
-            #energy_t, _ = energy(y_opt, y_t)
-            energy_t_candidate, _ = energy(y_opt, y_t_candidate)
 
+        # Compute energy difference due to single-point change in candidate.
+        """
+        K_cc = K[:len(y_t), :len(y_t)]  # candidate-candidate term
+        K_co = K[:len(y_t), len(y_t):]  # candidate-optimal term
+        curr_co_i_row = K_co[update_i]
+        curr_cc_i_row = K_cc[update_i]
+        curr_cc_i_col = K_cc[:, update_i]
+        new_co_i_row = np.linalg.norm(y_t_candidate[update_i] - y_opt, ord=power, axis=1)
+        new_cc_i_row = np.linalg.norm(y_t_candidate[update_i] - y_t_candidate, ord=power, axis=1)
+        new_cc_i_col = np.linalg.norm(y_t_candidate - y_t_candidate[update_i], ord=power, axis=1)
+        e_diff = (
+            2. / (len(y_t) ** 2) * np.sum(curr_co_i_row - new_co_i_row) -
+            2. / (len(y_t) ** 2) * np.sum(curr_cc_i_row - new_cc_i_row))
+        K[update_i, len(y_t):] = new_co_i_row
+        K[update_i, :len(y_t)] = new_cc_i_row
+        K[:len(y_t), update_i] = new_cc_i_col
+        #... another update for oc.
+        """
+        
+        K_cc_old = [np.linalg.norm(y_t[update_i] - y_t[i], ord=power) for i in range(len(y_t))]
+        K_co_old = [np.linalg.norm(y_t[update_i] - y_opt[i], ord=power) for i in range(len(y_opt))]
+        
+        K_cc_new = [np.linalg.norm(y_t_candidate[update_i] - y_t_candidate[i], ord=power) for i in range(len(y_t))]
+        K_co_new = [np.linalg.norm(y_t_candidate[update_i] - y_opt[i], ord=power) for i in range(len(y_opt))]
+        
+        part_e_old = (2. / (len(y_opt) ** 2)) * (np.sum(K_co_old) - np.sum(K_cc_old))
+        part_e_new = (2. / (len(y_opt) ** 2)) * (np.sum(K_co_new) - np.sum(K_cc_new))
+        
+        
         # Compute the acceptance ratio.
         # With U = 2 * DIM ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
         # 
@@ -695,8 +716,23 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
         # Also, as alpha increases, energy difference is magnified.
         # Therefore, with more support points and higher alpha, energy
         #   difference is magnified.
-        energy_diff = energy_t - energy_t_candidate
-        ratios_unthinned[i] = np.exp(diff_factor * energy_diff)
+        
+        # Compute metric for current and candidate.
+        if do_mmd:
+            energy_t, _ = mmd(y_t, y_opt, sigma=mmd_sigma)
+            energy_t_candidate, _ = mmd(y_t_candidate, y_opt, sigma=mmd_sigma)
+            energy_diff = energy_t_candidate - energy_t
+        else:
+            #energy_t, _ = energy(y_t, y_opt, power=power)
+            #energy_t_candidate, _ = energy(y_t_candidate, y_opt, power=power)
+            #energy_diff = energy_t_candidate - energy_t
+
+            energy_diff = part_e_new - part_e_old
+            energy_t_candidate = energy_t + energy_diff
+            #assert np.isclose(energy_t_candidate, energy(y_t_candidate, y_opt, power=power)[0])
+
+
+        ratios_unthinned[i] = np.exp(diff_factor * -1. * energy_diff)
 
         # print('e_t - e_t\' = {:.5f}, ratio = {:6f}'.format(
         #       energy_t - energy_t_candidate, ratios_unthinned[i]))
@@ -733,7 +769,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
                 step_size *= 0.5
             step_size = np.clip(step_size, 1e-5, max_step_size)
             
-        if i % int(chain_length / 20) == 0:
+        if i % int(chain_length / 10) == 0:
         #if i == chain_length - 1:
             print('acceptance_rate={:.8f}, step_size={:.8f}'.format(acceptance_rate, step_size))
             print('Energy diff: {:.8f}'.format(energy_diff))
@@ -752,7 +788,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
             plt.gca().set_aspect('equal', adjustable='box')
             plt.tight_layout()
             plt.savefig(os.path.join(save_dir, 'mh_sample.png'))
-            #plt.show()
+            plt.show()
 
         elif plot and x.shape[1] > 2 and i % int(chain_length / 10) == 0:
             plot_nd(x, title='data')
@@ -768,8 +804,8 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
     energy_estimation_errors = None
 
     # Plot results of markov chain.
-    #if plot:
-    if 1:
+    if plot:
+    #if 1:
         # Plot acceptance ratios.
         plt.plot(acceptance_rates)
         #plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
