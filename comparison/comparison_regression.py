@@ -112,15 +112,11 @@ def test_regression(data, data_heldout, weights=None):
         tf_weights = tf.placeholder(tf.float32, [None, 1], name='weights')
         tf_X = tf.placeholder(tf.float32, [None, d], name='X')
         tf_Y = tf.placeholder(tf.float32, [None, 1], name='Y')
-        #tf_coefs = tf.Variable(np.ones(shape=(d, 1)), name='coefs', dtype=tf.float32)
-        tf_coefs = tf.clip_by_value(
-                tf.Variable(np.ones(shape=(d, 1)), name='coefs', dtype=tf.float32),
-                0, 1)
+        tf_coefs = tf.Variable(np.ones(shape=(d, 1)), name='coefs', dtype=tf.float32)
         tf_Y_hat = tf.matmul(tf_X, tf_coefs)
         tf_loss_pred = tf.reduce_sum(tf_weights * tf.square(tf_Y - tf_Y_hat))
         tf_coef_norm = tf.norm(tf_coefs, ord=1)
-        #tf_loss = tf_loss_pred + tf_coef_norm
-        tf_loss = tf_loss_pred
+        tf_loss = tf_loss_pred + tf_coef_norm
 
         tf_optim = tf.train.GradientDescentOptimizer(1e-2).minimize(tf_loss)
 
