@@ -16,10 +16,26 @@ from kernels import EQKernel, compute_mean_feature_vector
 from utils import json_load, json_dump, dedup_consecutive
 
 
-def weighted_mmd(weights, synthetic, data, kernel, K_xx_mean=None):
+def weighted_mmd(synthetic, data, kernel=None, K_xx_mean=None, weights=None):
     # Compute real distance from private embedding
+
+    # Provide default uniform weights.
+    n = len(synthetic)
+    if weights is None:
+        weights = np.array([1. / n for _ in range(n)])
+
+    # Provide default kernel.
+    if kernel is None:
+        lengthscale = 0.5
+        N, D = np.shape(data)
+        gamma = 1.0 / lengthscale ** 2
+        kernel = EQKernel(D, gamma)
+
+    # Provide data-data portion of kernel.
     if K_xx_mean is None:
         K_xx_mean = kernel.get_kernel_matrix_mean(data)
+
+    # Compute metric.
     K_zz = kernel.get_kernel_matrix(synthetic)
     K_zx_rmeans = kernel.get_kernel_matrix_rowmeans(synthetic, data)
     dist2 = (
@@ -27,12 +43,13 @@ def weighted_mmd(weights, synthetic, data, kernel, K_xx_mean=None):
         2.0 * weights.dot(K_zx_rmeans) +
         K_xx_mean)
     dist_k_opt = np.sqrt(dist2)
+
     return dist_k_opt
 
 
 def sample_kme_synthetic(
         X_private, M=None, epsilon=None, J=10000, num_iters=100,
-        lr=0.5, lasso_alpha=100., lengthscale=0.5, uniform_weights=False,
+        lr=0.5, lasso_alpha=10., lengthscale=0.5, uniform_weights=False,
         plot=False, save_dir=None):
     """Computes synthetic set via private kernel mean embeddings.
 
@@ -118,7 +135,8 @@ def sample_kme_synthetic(
         weights = np.reshape(clf.coef_, (m+1))  # Below, reshape needed for case m=0
 
     # Compute weighted distance between synthetic and data.
-    dist_k_opt = weighted_mmd(weights, Z, X_private, kernel, K_xx_mean)
+    dist_k_opt = weighted_mmd(Z, X_private, kernel=kernel, K_xx_mean=K_xx_mean,
+            weights=weights)
     print('[Result] epsilon={}, M={}, mmd = {}'.format(epsilon, M, dist_k_opt))
 
     # Optionally plot.
@@ -133,4 +151,6 @@ def sample_kme_synthetic(
         plt.savefig(os.path.join(save_dir, 'balog_eps{}.png'.format(epsilon)))
         plt.close()
 
+    #print(weights)
+    #print(weights == 0)
     return Z, weights

@@ -148,11 +148,8 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
         
         # Build TensorFlow graph.
         tf.reset_default_graph()
-        #tf_input_data = tf.placeholder(tf.float32, [data.shape[0], data.shape[1]],
-        #                               name='input_data')
         tf_input_data = tf.placeholder(tf.float32, [None, data.shape[1]],
                                        name='input_data')
-        
         tf_candidate_sp = tf.Variable(gen, name='sp', dtype=tf.float32)
 
         if do_mmd:
@@ -577,6 +574,7 @@ def plot_nd(d, w=10, h=10, title=None):
     graph = pd.plotting.scatter_matrix(pd.DataFrame(d), figsize=(w, h));
     if title:
         plt.suptitle(title)
+    plt.savefig('../results/regression_logs/plot_nd_{}.png'.format(title))
     plt.show()
     plt.close()
 
@@ -743,8 +741,9 @@ def sample_sp_exp_mech(
             plt.show()
             plt.close()
         elif plot and x.shape[1] > 2 and i % int(chain_length / 10) == 0:
-            plot_nd(x, title='data')
-            plot_nd(y_mh[i], title='MH ~SP. It: {}, e={:.6f}'.format(i, energies_unthinned[i]))
+            plot_nd(y_mh[i],
+                    title='MH ~SP (priv={}, num_supp={}). It: {}, e={:.6f}'.format(
+                        alpha, num_supp, i, energies_unthinned[i]))
 
 
     # Thinned results.
@@ -761,8 +760,8 @@ def sample_sp_exp_mech(
         plt.ylabel('Acceptance rates', fontsize=14)
         plt.ylim((0,1))
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'mh_acceptance_ratios.png'))
         plt.show()
+        plt.savefig(os.path.join(save_dir, 'mh_acceptance_ratios.png'))
         plt.close()
 
         # Plot traceplot of energies.
@@ -771,8 +770,8 @@ def sample_sp_exp_mech(
         plt.xlabel('Sample', fontsize=14)
         plt.ylabel(r'Energy, $e(y, \tilde{y})$', fontsize=14)
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'mh_traceplot_energies.png'))
         plt.show()
+        plt.savefig(os.path.join(save_dir, 'mh_traceplot_energies.png'))
         plt.close()
 
         # Inspect correlation of energies.
@@ -781,8 +780,8 @@ def sample_sp_exp_mech(
             sum(ratios_unthinned > 1.) / len(ratios_unthinned)))
 
         # Inspect distribution of energies.
-        plt.title('Energies with MH, n={}'.format(len(energies)))
         plt.hist(energies, bins=20, alpha=0.3)
+        plt.title('Energies with MH, n={}'.format(len(energies)))
         plt.show()
         plt.close()
 
