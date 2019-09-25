@@ -581,7 +581,8 @@ def plot_nd(d, w=10, h=10, title=None):
 
 def sample_sp_exp_mech(
         x, num_supp, alpha=None, save_dir=None, plot=False, burnin=5000,
-        thinning=2000, power=1, max_iter=301, lr=1e-2):
+        thinning=2000, power=1, max_iter=301, lr=1e-2, return_chain=False,
+        y_init='uniform'):
     """Samples in space of support points.
 
     Args:
@@ -595,12 +596,14 @@ def sample_sp_exp_mech(
       power: Int, power in energy metric.
       max_iter: Int, num iters for sp optim.
       lr: Float, learning rate for sp optim.
+      return_chain: Boolean, return entire chain of energies.
+      y_init: String, starting position for MH sampler. ['uniform', 'opt']
 
     Returns:
       y_tilde: NumPy array, sampled support point sets.
       energy: Float, energy associated with sampled sets.
     """
-    num_y_tildes = 1
+    num_y_tildes = 20  # TODO: Change this to more for convergence diagnostics.
 
     # Get optimal support points.
     y_opt, e_opt = get_support_points(x, num_supp, max_iter, lr, is_tf=True)
@@ -624,15 +627,20 @@ def sample_sp_exp_mech(
     # Then accept Y_t' with probability min(1, \gamma).
 
     # Choose setup for Metropolis-Hastings.
-    max_step_size = 0.25 * (np.max(x) - np.min(x))
+    #max_step_size = 0.25 * (np.max(x) - np.min(x))
+    min_step_size = 1e-5
+    max_step_size = 1e5 
     step_size = 1e-2
-    chain_length = burnin + thinning * num_y_tildes
+    # Plus one for case num_y_tildes == 1.
+    chain_length = burnin + thinning * (num_y_tildes - 1) + 1
     print('Running chain. Length={}, Burn={}, Thin={}'.format(
         chain_length, burnin, thinning))
 
     # Initialize the support points Y_t.
-    #y_t = np.random.uniform(size=y_opt.shape)
-    y_t = y_opt
+    if y_init == 'uniform':
+        y_t = np.random.uniform(size=y_opt.shape)
+    else:
+        y_t = y_opt
 
     # Compute initial value.
     energy_t, _ = energy(y_t, y_opt, power=power)
@@ -650,7 +658,8 @@ def sample_sp_exp_mech(
 
     # Store last 100 acceptance rates.
     trail_len = 50
-    acceptance_rates_trailing = np.zeros(trail_len)
+    accepts_trailing_window = np.zeros(trail_len)
+    #acceptance_rates_trailing = np.zeros(trail_len)
     
     
     # Run chain.
@@ -661,8 +670,11 @@ def sample_sp_exp_mech(
         y_t_candidate = np.copy(y_t)
         y_t_candidate[update_i] += np.random.normal(scale=step_size, size=y_t.shape[1])
 
+        # TODO: Should candidate values be clipped to data domain?
+        #   Hypothesis: clipping along the way encourages pushing to corners.
+        #     Only clip to plot, or for final result.
         # Clip candidate values to data domain of [0,1].
-        y_t_candidate = np.clip(y_t_candidate, 0, 1)
+        #y_t_candidate = np.clip(y_t_candidate, 0, 1)
 
 
         # Compute energy difference due to single-point change in candidate.
@@ -700,16 +712,22 @@ def sample_sp_exp_mech(
             energy_t = energy_t_candidate
             y_mh[i] = y_t_candidate
             energies_unthinned[i] = energy_t_candidate
+
+            accepts_trailing_window[i % trail_len] = 1
+
         else:                                            # Reject.
             y_mh[i] = y_t
             energies_unthinned[i] = energy_t
 
+            accepts_trailing_window[i % trail_len] = 0
+
         # Adapt step size to keep acceptance rate around 30%.
         acceptance_rate = float(len(accepts)) / (i + 1)
         acceptance_rates[i] = acceptance_rate
-        acceptance_rates_trailing[i % trail_len] = acceptance_rate
+        #acceptance_rates_trailing[i % trail_len] = acceptance_rate
         if i % trail_len == trail_len - 1:
-            avg = np.mean(acceptance_rates_trailing)
+            #avg = np.mean(acceptance_rates_trailing)
+            avg = np.mean(accepts_trailing_window)
 
             if avg > 0.4:
                 step_size *= 2
@@ -719,20 +737,25 @@ def sample_sp_exp_mech(
                 step_size *= 0.8
             elif avg < 0.2:
                 step_size *= 0.5
-            step_size = np.clip(step_size, 1e-5, max_step_size)
+            step_size = np.clip(step_size, min_step_size, max_step_size)
             
         if i % int(chain_length / 10) == 0:
             print('acceptance_rate={:.8f}, step_size={:.8f}'.format(acceptance_rate, step_size))
             print('Energy diff: {:.8f}'.format(energy_diff))
 
         # Plot the points.
-        if plot and x.shape[1] == 2 and i % int(chain_length / 10) == 0:
+        if plot and x.shape[1] == 2 and i == chain_length - 1:  #i % int(chain_length / 10) == 0:
             plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
                         label='data')
             plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
                         label='sp(data)')
-            plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
-                        label='~sp(data)')
+            # Clip before plotting.
+            #plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
+            #            label='~sp(data)')
+            plot_y1 = np.clip(y_mh[i][:, 0], 0, 1)
+            plot_y2 = np.clip(y_mh[i][:, 1], 0, 1)
+            plt.scatter(plot_y1, plot_y2, c='red', alpha=0.7, label='~sp(data), clip')
+
             plt.xlim(0, 1)
             plt.ylim(0, 1)
             plt.gca().set_aspect('equal', adjustable='box')
@@ -740,10 +763,16 @@ def sample_sp_exp_mech(
             plt.savefig(os.path.join(save_dir, 'mh_sample.png'))
             plt.show()
             plt.close()
-        elif plot and x.shape[1] > 2 and i % int(chain_length / 10) == 0:
-            plot_nd(y_mh[i],
-                    title='MH ~SP (priv={}, num_supp={}). It: {}, e={:.6f}'.format(
-                        alpha, num_supp, i, energies_unthinned[i]))
+        elif plot and x.shape[1] > 2 and i == chain_length - 1:  #i % int(chain_length / 10) == 0:
+            #plot_nd(y_mh[i],
+            #        title='MH ~SP (num_supp={}, eps={}). It: {}, e={:.6f}'.format(
+            #            num_supp, alpha, i, energies_unthinned[i]))
+
+            # Clip before plotting.
+            plot_y = np.clip(y_mh[i], 0, 1)
+            plot_nd(plot_y,
+                    title='MH ~SP (num_supp={}, eps={}). It: {}, e={:.6f}'.format(
+                        num_supp, alpha, i, energies_unthinned[i]))
 
 
     # Thinned results.
@@ -757,11 +786,12 @@ def sample_sp_exp_mech(
         plt.plot(acceptance_rates)
         #plt.title('accept_ratios, median={:.5f}'.format(np.median(ratios)))
         plt.xlabel('Sample', fontsize=14)
-        plt.ylabel('Acceptance rates', fontsize=14)
+        plt.ylabel('Cumulative Acceptance Rate', fontsize=14)
         plt.ylim((0,1))
         plt.tight_layout()
         plt.show()
-        plt.savefig(os.path.join(save_dir, 'mh_acceptance_ratios.png'))
+        plt.savefig(os.path.join(save_dir,
+            'mh_acceptance_ratios_supp{}_eps{}.png'.format(num_supp, alpha)))
         plt.close()
 
         # Plot traceplot of energies.
@@ -771,7 +801,8 @@ def sample_sp_exp_mech(
         plt.ylabel(r'Energy, $e(y, \tilde{y})$', fontsize=14)
         plt.tight_layout()
         plt.show()
-        plt.savefig(os.path.join(save_dir, 'mh_traceplot_energies.png'))
+        plt.savefig(os.path.join(save_dir,
+            'mh_traceplot_energies_supp{}_eps{}.png'.format(num_supp, alpha)))
         plt.close()
 
         # Inspect correlation of energies.
@@ -787,4 +818,7 @@ def sample_sp_exp_mech(
 
     # --------------------------------------------------------------
 
-    return y_tildes[0], energies[0]
+    if return_chain:
+        return y_tildes, energies, energies_unthinned
+    else:
+        return y_tildes, energies

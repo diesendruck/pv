@@ -2,6 +2,7 @@
 # Private Support Points: Regression Examples
 
 import argparse
+import arviz as az
 import collections
 import json
 import logging
@@ -15,6 +16,7 @@ import pandas as pd
 import pdb
 import scipy.stats as stats
 import sklearn
+import sys
 import tensorflow as tf
 import time
 
@@ -97,64 +99,68 @@ def test_regression(data, data_heldout, weights=None):
     # Fit (optionally weighted) linear model given a train-test split.
     if weights is not None:
 
-        #######################################################
-        # TODO: Consider scaling weights to be non-negative.
+        ########################################################
+        ## TODO: Consider scaling weights to be non-negative.
 
-        # Optimize betas of regression with given weights.
-        # argmin_b sum_i (w_i * (y_i - b^t.x_i) ** 2)
-        n, d = train_X.shape
-        train_Y = np.reshape(train_Y, [-1, 1])
-        weights = np.reshape(weights, [-1, 1])
-        assert len(weights) == n, 'Weights dim must match train_X'
+        ## Optimize betas of regression with given weights.
+        ## argmin_b sum_i (w_i * (y_i - b^t.x_i) ** 2)
+        #n, d = train_X.shape
+        #train_Y = np.reshape(train_Y, [-1, 1])
+        #weights = np.reshape(weights, [-1, 1])
+        #assert len(weights) == n, 'Weights dim must match train_X'
 
-        # Set up TensorFlow graph.
-        tf.reset_default_graph()
-        tf_weights = tf.placeholder(tf.float32, [None, 1], name='weights')
-        tf_X = tf.placeholder(tf.float32, [None, d], name='X')
-        tf_Y = tf.placeholder(tf.float32, [None, 1], name='Y')
-        tf_coefs = tf.Variable(np.ones(shape=(d, 1)), name='coefs', dtype=tf.float32)
-        tf_Y_hat = tf.matmul(tf_X, tf_coefs)
-        tf_loss_pred = tf.reduce_sum(tf_weights * tf.square(tf_Y - tf_Y_hat))
-        tf_coef_norm = tf.norm(tf_coefs, ord=1)
-        tf_loss = tf_loss_pred + tf_coef_norm
+        ## Set up TensorFlow graph.
+        #tf.reset_default_graph()
+        #tf_weights = tf.placeholder(tf.float32, [None, 1], name='weights')
+        #tf_X = tf.placeholder(tf.float32, [None, d], name='X')
+        #tf_Y = tf.placeholder(tf.float32, [None, 1], name='Y')
+        #tf_coefs = tf.Variable(np.ones(shape=(d, 1)), name='coefs', dtype=tf.float32)
+        #tf_Y_hat = tf.matmul(tf_X, tf_coefs)
+        #tf_loss_pred = tf.reduce_sum(tf_weights * tf.square(tf_Y - tf_Y_hat))
+        #tf_coef_norm = tf.norm(tf_coefs, ord=1)
+        #tf_loss = tf_loss_pred + tf_coef_norm
 
-        tf_optim = tf.train.GradientDescentOptimizer(1e-2).minimize(tf_loss)
+        #tf_optim = tf.train.GradientDescentOptimizer(1e-2).minimize(tf_loss)
 
-        tf_init_op = tf.global_variables_initializer()
-        tf_gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
-        tf_sess_config = tf.ConfigProto(
-                allow_soft_placement=True,
-                gpu_options=tf_gpu_options)
+        #tf_init_op = tf.global_variables_initializer()
+        #tf_gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
+        #tf_sess_config = tf.ConfigProto(
+        #        allow_soft_placement=True,
+        #        gpu_options=tf_gpu_options)
 
-        # Fit model.
-        prediction_losses = []
-        with tf.Session(config=tf_sess_config) as sess:
-            sess.run(tf_init_op)
-            for it in range(200):
-                _, loss_, coefs_, loss_pred_, coef_norm_ = sess.run(
-                        [tf_optim, tf_loss, tf_coefs, tf_loss_pred, tf_coef_norm],
-                        {tf_X: train_X, tf_Y: train_Y, tf_weights: weights})
-                if it % 10 == 0:
-                    prediction_losses.append(loss_)
-                    print('\n\nit {}. tf_loss = {},\ntf_coefs = {}\n'.format(it, loss_, coefs_))
-                    print('loss_pred = {}, coef_norm = {}'.format(loss_pred_, coef_norm_))
-                    y_, y_hat_ = sess.run(
-                            [tf_Y, tf_Y_hat],
-                            {tf_X: test_X[:5],
-                             tf_Y: np.reshape(test_Y, [-1, 1])[:5]})
-                    print('weights')
-                    print(weights)
-                    print('test_Y')
-                    print(y_)
-                    print('test_Y_hat')
-                    print(y_hat_)
+        ## Fit model.
+        #prediction_losses = []
+        #with tf.Session(config=tf_sess_config) as sess:
+        #    sess.run(tf_init_op)
+        #    for it in range(200):
+        #        _, loss_, coefs_, loss_pred_, coef_norm_ = sess.run(
+        #                [tf_optim, tf_loss, tf_coefs, tf_loss_pred, tf_coef_norm],
+        #                {tf_X: train_X, tf_Y: train_Y, tf_weights: weights})
+        #        if it % 10 == 0:
+        #            prediction_losses.append(loss_)
+        #            print('\n\nit {}. tf_loss = {},\ntf_coefs = {}\n'.format(it, loss_, coefs_))
+        #            print('loss_pred = {}, coef_norm = {}'.format(loss_pred_, coef_norm_))
+        #            y_, y_hat_ = sess.run(
+        #                    [tf_Y, tf_Y_hat],
+        #                    {tf_X: test_X[:5],
+        #                     tf_Y: np.reshape(test_Y, [-1, 1])[:5]})
+        #            print('weights')
+        #            print(weights)
+        #            print('test_Y')
+        #            print(y_)
+        #            print('test_Y_hat')
+        #            print(y_hat_)
 
-            # Measure MSE on test data.
-        print(prediction_losses)
-        pdb.set_trace()
+        #    # Measure MSE on test data.
+        #print(prediction_losses)
+        #pdb.set_trace()
 
-        #######################################################
-            
+        ########################################################
+        weights = np.maximum(weights, 0)  # Raises negative vals to zero.
+        lm = LinearRegression()
+        lm.fit(train_X, train_Y, sample_weight=weights)
+        pred_Y = lm.predict(test_X)
+        mse = mean_squared_error(test_Y, pred_Y)
 
     else:
         lm = LinearRegression()
@@ -222,10 +228,74 @@ def resample_from_histdd(H, edge_sets, n=100, plot=False):
         
     return resampled
     
+
+def diagnose_energy_chains(chains, burnin, thinning, num_supp, alpha, save_dir):
+    """Diagnoses MH chain convergence.
+
+    Args:
+        chains: Array, where each row is an independent chain.
+        burnin: Int, number of iterations to burn.
+        thinning: Int, number of iterations - 1 between accepted samples.
+        num_supp: Int, number of support points.
+        alpha: Float, privacy budget.
+        save_dir: String, directory to save plot.
+
+    Returns:
+        None
+    """
+
+    chains = np.transpose(chains)  # Now each chain is a col.
+    n, num_chains = chains.shape
+
+    # Plot chains to show convergence to similar energy value.
+    fig, ax = plt.subplots(1, 4, figsize=(12, 6))
+
+    ax[0].plot(chains)
+    ax[0].set_xlabel('Iteration')
+    ax[0].set_ylabel('Energy')
+
+    ax[1].plot(chains[-500:,:])
+    ax[1].set_xlabel('Last 500 Iterations')
+    ax[1].set_ylabel('Energy')
+
+    # Compute Gelman-Rubin diagnostic over accumulating history, post burn-in.
+    gelman_rubin_stats = []
+    running_betweens = []
+    running_withins = []
+    for i in range(burnin + 5, n):
+        chains_so_far = chains[burnin:i, :]
+
+        between_chain_var = np.var(np.mean(chains_so_far, axis=0), ddof=1)
+        within_chain_var = np.mean(np.var(chains_so_far, axis=0, ddof=1))
+        running_betweens.append(between_chain_var)
+        running_withins.append(within_chain_var)
+
+        # https://arviz-devs.github.io/arviz/generated/arviz.rhat.html
+        chains_so_far = np.transpose(chains[burnin:i, :])
+        gelman_rubin_stat = az.rhat(chains_so_far)
+        gelman_rubin_stats.append(gelman_rubin_stat)
+
+    ax[2].plot(gelman_rubin_stats)
+    ax[2].set_xlabel('Iteration')
+    ax[2].set_ylabel('Gelman-Rubin')
+
+    ax[3].plot(running_betweens, label='between')
+    ax[3].plot(running_withins, label='within')
+    ax[3].set_xlabel('Iteration')
+    ax[3].set_ylabel('Variance')
+    ax[3].legend()
+
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(
+        save_dir, 'mh_convergence_supp{}_eps{}.png'.format(num_supp, alpha)))
+
+    plt.close()
+
     
 def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                     max_iter, lr, num_sp_samples, results_logfile=None,
-                    method='mh', burnin=5000, num_cv_splits=None, power=None):
+                    method='mh', burnin=5000, thinning=2000, num_cv_splits=None, power=None):
     """Runs panel of experiments for different number of support points
     and different alpha settings.
     
@@ -240,6 +310,7 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
           to average regression performance.
         method: String, name of private-sampling method. ['diffusion', 'mh']
         burnin: Int, number of samples to burn in MH sampler.
+        thinning: Int, thinning gap in MH.
         num_cv_splits: Int, number of cross validation splits.
         power: Int, power in energy metric. [1, 2]
       
@@ -267,7 +338,7 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
     
         visualize_data(data, title='train')
     
-        """
+
         # --------------------------------------
         # Test regression on FULL TRAINING data.
         # --------------------------------------
@@ -301,6 +372,61 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                         'mmd': mmd,
                         'size': num_supp, 
                         'tag': 'random_subset'}
+                with open(results_logfile, 'a') as f:
+                    json.dump(sorted_dict(result), f)
+                    f.write(os.linesep)
+
+
+        # --------------------------------------------
+        # Test regression on PERTURBED HISTOGRAM data.
+        # --------------------------------------------
+        
+        print('Starting perturbed histograms.')
+        _LOG.info('Starting perturbed histograms.')
+
+        for alpha in alphas:
+            _N, _DIM = data.shape
+            # TODO: What bin count (per dim) is too small?
+            # https://arxiv.org/pdf/1504.05998.pdf
+            num_bins = (_N * alpha / 10) ** ((2 * _DIM) / (2 + _DIM))
+            #num_bins_per_dim = min(10, int(np.round(num_bins ** (1 / _DIM))))  
+            num_bins_per_dim = int(np.round(num_bins ** (1 / _DIM)))  
+            try:
+                # Get true histogram, and perturb with Laplace noise.
+                H, edges = np.histogramdd(data, bins=num_bins_per_dim)
+            except:
+                print('[!] Perturbed histogram does not fit in memory. Skipping.')
+                _LOG.warning(('Skipping histogram for dataset={}, alpha={}. '
+                              'num_bins_per_dim ** dim, {} ** {} is too large.').format(
+                    dataset_name, alpha, num_bins_per_dim, _DIM))
+                break
+            
+            for _ in range(num_sp_samples):
+                # Perturb histogram counts with Laplace noise.
+                H_perturbed = H + np.random.laplace(loc=0, scale=1/alpha, size=H.shape)
+                H_perturbed = H_perturbed.astype(np.float32)
+
+                # Resample from perturbed histogram, using uniform sampling per bin.
+                try:
+                    perturbed_hist = resample_from_histdd(H_perturbed, edges, n=_N)
+                except:
+                    print('[!] Failed on resample_from_histdd. Skipping.')
+                    _LOG.warning(('Failed on resample_from_histdd. '
+                                  'dataset={}, alpha={}. '
+                                  'num_bins_per_dim ** dim, {} ** {} '
+                                  'is too large.').format(
+                        dataset_name, alpha, num_bins_per_dim, _DIM))
+                    break
+
+                # Evaluate regression performance on heldout data.
+                mse = test_regression(perturbed_hist, data_heldout)
+                mmd = weighted_mmd(perturbed_hist, data)
+                result = {
+                        'dataset_name': dataset_name,
+                        'mse': mse,
+                        'mmd': mmd,
+                        'alpha': alpha, 
+                        'tag': 'perturbed_hist'}
                 with open(results_logfile, 'a') as f:
                     json.dump(sorted_dict(result), f)
                     f.write(os.linesep)
@@ -346,52 +472,23 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
             #print('num_supp={}, e_rand={:.8f}, e_supp={:.8f}'.format(num_supp, e_rand, e_supp))
 
 
-        # --------------------------------------------
-        # Test regression on PERTURBED HISTOGRAM data.
-        # --------------------------------------------
-        
-        _LOG.info('Starting perturbed histograms.')
-
-        for alpha in alphas:
-            _N, _DIM = data.shape
-            # TODO: What bin count (per dim) is too small?
-            # https://arxiv.org/pdf/1504.05998.pdf
-            num_bins = (_N * alpha / 10) ** ((2 * _DIM) / (2 + _DIM))
-            num_bins_per_dim = min(10, int(np.round(num_bins ** (1 / _DIM))))  
-            try:
-                # Get true histogram, and perturb with Laplace noise.
-                H, edges = np.histogramdd(data, bins=num_bins_per_dim)
-            except:
-                print('[!] Perturbed histogram does not fit in memory. Skipping.')
-                _LOG.warning(('Skipping histogram for dataset={}, alpha={}. '
-                              'num_bins_per_dim ** dim, {} ** {} is too large.').format(
-                    dataset_name, alpha, num_bins_per_dim, _DIM))
-                break
-            
-            for _ in range(num_sp_samples):
-                # Perturb histogram counts with Laplace noise.
-                H_perturbed = H + np.random.laplace(loc=0, scale=1/alpha, size=H.shape)
-
-                # Resample from perturbed histogram, using uniform sampling per bin.
-                perturbed_hist = resample_from_histdd(H_perturbed, edges, n=_N)
-
-                # Evaluate regression performance on heldout data.
-                mse = test_regression(perturbed_hist, data_heldout)
-                mmd = weighted_mmd(perturbed_hist, data)
-                result = {
-                        'dataset_name': dataset_name,
-                        'mse': mse,
-                        'mmd': mmd,
-                        'alpha': alpha, 
-                        'tag': 'perturbed_hist'}
-                with open(results_logfile, 'a') as f:
-                    json.dump(sorted_dict(result), f)
-                    f.write(os.linesep)
-
-
         # ------------------------------------------
         # Test regression on PRIVATE SUPPORT POINTS.
         # ------------------------------------------
+
+
+        ## Load existing data and diagnose.
+        #save_dir = '../results/regression_logs'
+        ##for num_supp in num_supp_list:
+        ##    for alpha in alphas:
+        #for num_supp in [8]:
+        #    for alpha in [1]:
+        #        f = os.path.join(save_dir,
+        #                'energy_chains_supp{}_eps{}.npy'.format(num_supp, alpha))
+        #        chains = np.load(f)
+        #        diagnose_energy_chains(chains, burnin, thinning, num_supp, alpha, save_dir)
+        #pdb.set_trace()
+
 
         for num_supp in num_supp_list:
 
@@ -403,14 +500,30 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
 
                 # Compute private support points.
                 # For this (_n, alpha) combo, run sampler many times.
+                save_dir = '../results/regression_logs'
                 priv_sp_sets = []
-                for _ in range(num_sp_samples):
-                    (private_sp,
-                     energy_) = sample_sp_exp_mech(data, num_supp, alpha=alpha,
-                                                   save_dir='../results/regression_logs',
-                                                   plot=False)
-                    priv_sp_sets.append(private_sp)
+                chain_sets = []
+                # Each iteration is an independent chain.
+                for i in range(num_sp_samples):
+                    print('\nRunning MH iter {}/{}'.format(i+1, num_sp_samples))
+                    (private_sps,
+                     _,
+                     energies_unthinned) = sample_sp_exp_mech(
+                             data, num_supp, alpha=alpha,
+                             save_dir=save_dir,
+                             plot=True,
+                             burnin=burnin,
+                             return_chain=True)
+                    priv_sp_sets.extend(private_sps)  # Extend, for flattened list.
+                    chain_sets.append(energies_unthinned)
+
+                np.save(os.path.join(
+                    save_dir,
+                    'energy_chains_supp{}_eps{}.npy'.format(num_supp, alpha)), chain_sets)
+                diagnose_energy_chains(
+                        chain_sets, burnin, thinning, num_supp, alpha, save_dir)
                 
+                print(np.array(priv_sp_sets).shape)
 
                 # Test regression on private support points.
                 for priv_sp_set in priv_sp_sets:
@@ -450,7 +563,7 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                              data, M=num_supp, epsilon=alpha,
                              uniform_weights=True,  # Unweighted points.
                              save_dir='../results/regression_logs',
-                             plot=False)
+                             plot=True)
                     priv_kme_uniform_sets.append(private_kme_uniform)
 
                 # Test regression on private KME uniform points.
@@ -468,7 +581,6 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                         json.dump(sorted_dict(result), f)
                         f.write(os.linesep)
 
-        """
 
         # ----------------------------------------
         # Test regression on PRIVATE KME WEIGHTED. 
@@ -492,12 +604,20 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                              data, M=num_supp, epsilon=alpha,
                              uniform_weights=False,  # Weighted points.
                              save_dir='../results/regression_logs',
-                             plot=False)
+                             plot=True)
                     priv_kme_weighted_sets.append([points_, weights_])
 
                 # Test regression on private KME weighted points.
                 for priv_kme_weighted_set in priv_kme_weighted_sets:
                     points_, weights_ = priv_kme_weighted_set
+
+                    # Skip if weights are all negative or zero.
+                    if np.all(weights_ <= 0.):
+                        _LOG.info(('Skipped private kme weighted: '
+                                   'num_supp={}, alpha={}').format(
+                                       num_supp, alpha))
+                        continue
+
                     mse = test_regression(
                             points_, data_heldout, weights=weights_)
                     mmd = weighted_mmd(points_, data, weights=weights_)
@@ -554,7 +674,7 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
     x_jitter = (max(x) - min(x)) / 40.
     
     fig, (ax1, ax2) = plt.subplots(1, 2, sharey=True, figsize=(15, 8))
-    fig.suptitle(dataset_name)
+    #fig.suptitle(dataset_name)
     
     # -------------------------------------
     # Make boxplot for full-size sets.
@@ -630,7 +750,11 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
         pct75.append(np.percentile(res, 75))
     
     ax2.set_ylim(0,1)
-    ax2.errorbar(x + 1 * x_jitter, pct50, yerr=[pct25, pct75], label='support_points')
+    ax2.errorbar(x + 1 * x_jitter,
+                 pct50,
+                 yerr=[pct25, pct75],
+                 label='support_points',
+                 marker='x')
         
     ###############
     # Private support points.
@@ -656,7 +780,8 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
         ax2.errorbar(x + 2 * x_jitter + i * x_jitter,
                      pct50,
                      yerr=[pct25, pct75],
-                     label=r'sp, $\alpha={}$'.format(alpha))
+                     label=r'sp, $\alpha={}$'.format(alpha),
+                     marker='^')
 
     ###############
     # Private KME uniform synthetic.
@@ -682,7 +807,8 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
         ax2.errorbar(x + 3 * x_jitter + i * x_jitter,
                      pct50,
                      yerr=[pct25, pct75],
-                     label=r'kme_uniform, $\alpha={}$'.format(alpha))
+                     label=r'kme_uniform, $\alpha={}$'.format(alpha),
+                     marker='+')
 
 
     ###############
@@ -709,16 +835,17 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
         ax2.errorbar(x + 3 * x_jitter + i * x_jitter,
                      pct50,
                      yerr=[pct25, pct75],
-                     label=r'kme_weighted, $\alpha={}$'.format(alpha))
+                     label=r'kme_weighted, $\alpha={}$'.format(alpha),
+                     marker='o')
 
     # ------------------------------------    
     
-    ax1.set_xlabel('Data used for fitting')    
+    ax1.set_xlabel('Data Used For Fitting')    
     ax2.set_xlabel('Number of Points, Fraction of Whole')
     ax1.set_ylabel('Mean Squared Error')
 
     ax2.legend()
-    plt.savefig('../results/regression_logs/global_results_{}'.format(dataset_name))
+    plt.savefig('../results/regression_logs/results_{}'.format(dataset_name))
     plt.show()
     plt.close()
 
@@ -732,10 +859,22 @@ def main():
     run_diabetes = 1
     run_california = 1
 
-    alphas = [10 ** p for p in [3, 4, 5]]  # [2, 3, 4, 5], [5, 4, 3, 2]
-    num_sp_samples = 1  # 10
-    num_cv_splits = 2  # 5
+    alphas = [10 ** p for p in [2, 3, 4]]  # [2, 3, 4, 5], [5, 4, 3, 2]
+    num_sp_samples = 5  # 10
+    num_cv_splits = 5  # 5
+
     power = 1
+
+    plot_only = True
+    if plot_only:
+        print('Only plotting existing results.')
+        percent_num_supp = [0.05, 0.1, 0.2]
+        plot_final_results(results_logfile, 'boston', percent_num_supp, alphas)
+        plot_final_results(results_logfile, 'diabetes', percent_num_supp, alphas)
+        plot_final_results(results_logfile, 'california', percent_num_supp, alphas)
+        print('Exiting.')
+        sys.exit()
+
 
 
     ################################
@@ -755,11 +894,11 @@ def main():
 
     # Define set of parameters to test.
     train_size = int(len(data) * (num_cv_splits - 1) / num_cv_splits)
-    percent_num_supp = [0.02, 0.05, 0.1]
+    percent_num_supp = [0.05, 0.1, 0.2]
     num_supp_list = [int(train_size * i) for i in percent_num_supp]
     max_iter = 301 #501  # 301
     lr = 0.5 #0.01         # 0.5
-    burnin = 5000
+    burnin = 25000  # 5000
 
 
     # Run experiments and print results.
@@ -788,16 +927,16 @@ def main():
 
     # Define set of parameters to test.
     train_size = int(len(data) * (num_cv_splits - 1) / num_cv_splits) 
-    percent_num_supp = [0.02, 0.05, 0.1]
+    percent_num_supp = [0.05, 0.1, 0.2]
     num_supp_list = [int(train_size * i) for i in percent_num_supp]
     max_iter = 301
     lr = 0.5
-    burnin = 5000
+    burnin = 25000
 
     # Run experiments and print results.
     if run_diabetes:
         run_experiments(dataset_name, data, num_supp_list, alphas, max_iter, lr,
-                num_sp_samples, results_logfile=results_logfile,
+                num_sp_samples, results_logfile=results_logfile, burnin=burnin,
                 num_cv_splits=num_cv_splits, power=power)
     if run_diabetes:
         plot_final_results(results_logfile, 'diabetes', percent_num_supp, alphas)
@@ -820,16 +959,16 @@ def main():
 
     # Define set of parameters to test.
     train_size = int(len(data) * (num_cv_splits - 1) / num_cv_splits) 
-    percent_num_supp = [0.02, 0.05, 0.1]
+    percent_num_supp = [0.05, 0.1, 0.2]
     num_supp_list = [int(train_size * i) for i in percent_num_supp]
     max_iter = 501
     lr = 1.
-    burnin = 5000
+    burnin = 25000
 
     # Run experiments and print results.
     if run_california:
         run_experiments(dataset_name, data, num_supp_list, alphas, max_iter, lr,
-                num_sp_samples, results_logfile=results_logfile,
+                num_sp_samples, results_logfile=results_logfile, burnin=burnin,
                 num_cv_splits=num_cv_splits, power=power)
     if run_california:
         plot_final_results(results_logfile, 'california', percent_num_supp, alphas)

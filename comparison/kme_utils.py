@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 plt.style.use('ggplot')
 import numpy as np
 import os
+import pandas as pd
 import pdb
 import torch
 dtype = torch.DoubleTensor
@@ -49,7 +50,7 @@ def weighted_mmd(synthetic, data, kernel=None, K_xx_mean=None, weights=None):
 
 def sample_kme_synthetic(
         X_private, M=None, epsilon=None, J=10000, num_iters=100,
-        lr=0.5, lasso_alpha=10., lengthscale=0.5, uniform_weights=False,
+        lr=0.5, lasso_alpha=1., lengthscale=0.5, uniform_weights=False,
         plot=False, save_dir=None):
     """Computes synthetic set via private kernel mean embeddings.
 
@@ -130,7 +131,7 @@ def sample_kme_synthetic(
     else:
         # Re-fit weights with a regularization.
         Phi = rf_np(Z)
-        clf = Lasso(fit_intercept=False, alpha=alpha)
+        clf = Lasso(fit_intercept=False, alpha=alpha)  # Possibly add max_iter=5000.
         clf.fit(np.transpose(Phi), empirical_public)
         weights = np.reshape(clf.coef_, (m+1))  # Below, reshape needed for case m=0
 
@@ -140,7 +141,7 @@ def sample_kme_synthetic(
     print('[Result] epsilon={}, M={}, mmd = {}'.format(epsilon, M, dist_k_opt))
 
     # Optionally plot.
-    if plot:
+    if plot and X_private.shape[1] == 2:
         fig, ax = plt.subplots()
         ax.scatter(X_private[:, 0], X_private[:, 1], c='gray', alpha=0.3)
         ax.scatter(Z[:, 0], Z[:, 1], c=weights, cmap='cool')  # Plot Lasso weights.
@@ -150,6 +151,12 @@ def sample_kme_synthetic(
             N, M, epsilon, dist_k_opt))
         plt.savefig(os.path.join(save_dir, 'balog_eps{}.png'.format(epsilon)))
         plt.close()
+    elif plot and X_private.shape[1] > 2:
+        pd.plotting.scatter_matrix(pd.DataFrame(Z), c='blue')
+        plt.suptitle('num_supp={}, eps={}'.format(M, epsilon))
+        plt.savefig(os.path.join(save_dir, 'balogZ_eps{}.png'.format(epsilon)))
+        plt.close()
+
 
     #print(weights)
     #print(weights == 0)
