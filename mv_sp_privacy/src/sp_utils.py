@@ -22,7 +22,8 @@ def scale_01(data):
     return data
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
-                       Y_INIT_OPTION='radial', clip='bounds', do_wlb=False,
+                       power=None, Y_INIT_OPTION='radial',
+                       clip='bounds', do_wlb=False,
                        plot=True, do_mmd=False, mmd_sigma=None):
     """Initializes and gets support points.
     
@@ -32,6 +33,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
       max_iter: Scalar, number of times to loop through updates for all vars.
       lr: Scalar, amount to move point with each gradient update.
       is_tf: Boolean, chooses TensorFlow optimization.
+      power: Int, power of energy metric.
       clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
         are [0,1].
       do_wlb: Boolean, chooses to use Exponential random weight for 
@@ -43,6 +45,8 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
       y_opt: (max_iter,N,D)-array. Trace of generated proposal points.
       e_opt: Float, energy between data and last iteration of y_out.
     """
+    assert power >= 1, 'Power must be >= 1.'
+
         
     print('\nSTARTING RUN. is_tf: {}, y_init: {}, clip: {}, wlb: {}'.format(
         is_tf, Y_INIT_OPTION, clip, do_wlb))
@@ -90,6 +94,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
     # Optimize particles for each dataset (x0 and x1).
     y_opt, e_opt = optimize_support_points(x, y, max_iter=max_iter,
                                            learning_rate=lr, is_tf=is_tf,
+                                           power=power,
                                            #save_iter=[int(max_iter / 2), max_iter - 1],  # PICK A SAVE_ITER.
                                            #save_iter=[5, 10, 50, 100, max_iter - 1],
                                            #save_iter=max_iter - 1,
@@ -107,7 +112,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
 
 def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
-                            is_tf=False, energy_power=2., save_iter=100,
+                            is_tf=False, power=None, save_iter=100,
                             clip='bounds', do_wlb=False, do_mmd=False,
                             mmd_sigma=None, plot=True):
     """Runs TensorFlow optimization, n times through proposal points.
@@ -118,6 +123,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
       max_iter: Scalar, number of times to loop through updates for all vars.
       learning_rate: Scalar, amount to move point with each gradient update.
       is_tf: Boolean, chooses TensorFlow optimization.
+      power: Int, power of energy metric.
       clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
         are [0,1].
       do_wlb: Boolean, chooses to use Exponential random weight for 
@@ -130,6 +136,8 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
       y_opt: (max_iter,N,D)-array. Trace of generated proposal points.
       e_opt: Float, energy between data and last iteration of y_out.
     """
+    assert power >= 1, 'Power must be >= 1.'
+
     
     # Create WLB weights.
     if do_wlb:
@@ -159,7 +167,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
             tf_e_out, _ = mmd(tf_input_data, tf_candidate_sp, sigma=mmd_sigma,
                               is_tf=True, weights=exp_weights)
         else:
-            tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=energy_power,
+            tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=power,
                                  is_tf=True, weights=exp_weights)
 
         opt = tf.train.AdamOptimizer(learning_rate)
@@ -265,7 +273,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
                 e_, e_grads = mmd(data, gen, sigma=mmd_sigma)
                 gen -= learning_rate * e_grads
             else:
-                e_, e_grads = energy(data, gen, power=energy_power)
+                e_, e_grads = energy(data, gen, power=power)
                 gen -= learning_rate * e_grads
 
             # -----------------------------------------------------------------
@@ -306,7 +314,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
     return y_out, e_
 
 
-def energy(data, gen, power=2., is_tf=False, weights=None, return_k=False):
+def energy(data, gen, power=None, is_tf=False, weights=None, return_k=False):
     """Computes abbreviated energy statistic between two point sets.
 
     The smaller the value, the closer the sets.
@@ -372,6 +380,8 @@ def energy(data, gen, power=2., is_tf=False, weights=None, return_k=False):
         e = (2. / n / m * tf.reduce_sum(K_xy) -
              1. / m / m * tf.reduce_sum(K_xx) -
              1. / n / n * tf.reduce_sum(K_yy))
+        
+        e = tf.sqrt(e)  # TODO: Testing.
 
         gradients_e = None
     
@@ -404,7 +414,9 @@ def energy(data, gen, power=2., is_tf=False, weights=None, return_k=False):
         e = (2. / gen_num / data_num * np.sum(K_xy) -
              1. / data_num / data_num * np.sum(K_xx) -
              1. / gen_num / gen_num * np.sum(K_yy))
-            
+        
+        e = np.sqrt(e)  # TODO: Testing.
+        
         
         # TODO: COMPUTE GRADIENTS FOR WEIGHTED DATA.
         if weights is not None:
@@ -552,20 +564,23 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
         return mmd, gradients_mmd
 
 
-def get_energy_sensitivity(data, num_supp, power=None):
+def get_energy_sensitivity(data, reference_size, power=None):
     """Computes energy sensitivity.
 
     Args:
         data (array): Data set, from which dimension will be computed.
-        num_supp (int): Number of support points.
+        reference_size (int): Number of points in reference set (either
+          data size, or SP size if comparing to SP.
 
     Returns:
         energy_sensitivity (float): Sensitivity value.
     """
+    assert power is not None, 'power is None. Define it.'
     dim = data.shape[1]
 
     # Define energy sensitivity for Exponential Mechanism.
-    energy_sensitivity = 2 * dim ** (1. / power) * (2 * num_supp - 1) / num_supp ** 2
+    energy_sensitivity = (
+        2 * dim ** (1. / power) * (2 * reference_size - 1) / reference_size ** 2)
     
     return energy_sensitivity
 
@@ -577,10 +592,10 @@ def plot_nd(d, w=10, h=10, title=None):
     #plt.show()
 
 
-def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes=1,
-                       alpha=None, plot=False, diffusion_mean=False, do_mmd=False,
+def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_tildes=1,
+                       alpha=None, plot=False, do_mmd=False,
                        mmd_sigma=None, burnin=5000, thinning=2000, partial_update=True,
-                       save_dir=None, power=None):
+                       save_dir=None, power=None, set_seed=False):
     """Samples in space of support points.
 
     Args:
@@ -592,7 +607,6 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
       num_y_tildes: Samples of support points to draw.
       alpha: Float, privacy budget.
       plot: Boolean, controls plotting.
-      diffusion_mean: Picks mean instead of sampling from Exponential.
       do_mmd: Boolean, chooses MMD instead of energy distance.
       mmd_sigma: Float, bandwidth of MMD kernel.
       burnin: Int, number of burned iterations in Metropolis Hastings.
@@ -600,12 +614,16 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
       partial_update: Boolean, in MH do random walk only on a random subset.
       save_dir: String, location to save plots.
       power: Int, power in energy metric.
+      set_seed: Boolean, whether to set seed before sampling.
 
     Returns:
       y_tildes: NumPy array, sampled support point sets.
       energies: NumPy array, energies associated with sampled sets.
       energy_estimation_errors: NumPy array, relative error of energy approximation.
     """
+    if plot == True:
+        assert save_dir is not None, 'To plot, must define save_dir.'
+    
     if do_mmd:
         print('[*] Using MMD as distribution distance.')
     
@@ -659,6 +677,9 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
     acceptance_rates_trailing = np.zeros(trail_len)
     
     
+    if set_seed:
+        np.random.seed(234)
+    
     # Run chain.
     for i in range(chain_length):
         
@@ -706,7 +727,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
         
         
         # Compute the acceptance ratio.
-        # With U = 2 * DIM ** (1. / ENERGY_POWER) * (2 * N - 1) / N ** 2
+        # With U = 2 * DIM ** (1. / POWER) * (2 * N - 1) / N ** 2
         # 
         #         exp(- a / (2U) * e_t')
         # ratio = ---------------------- = exp( a / (2U) * (e_t - e_t'))
@@ -781,13 +802,13 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
                         label='data')
             plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
                         label='sp(data)')
-            plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=0.7,
-                        label='~sp(data)')
+            plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=1,
+                        label='~sp(data)', marker='+')
             plt.xlim(0, 1)
             plt.ylim(0, 1)
             plt.gca().set_aspect('equal', adjustable='box')
             plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, 'mh_sample.png'))
+            plt.savefig(os.path.join(save_dir, 'priv_sp_sample.png'))
             plt.show()
 
         elif plot and x.shape[1] > 2 and i % int(chain_length / 10) == 0:
@@ -813,7 +834,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
         plt.ylabel('Acceptance rates', fontsize=14)
         plt.ylim((0,1))
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'mh_acceptance_ratios.png'))
+        #plt.savefig(os.path.join(save_dir, 'priv_sp_acceptance_ratios.png'))
         plt.show()
 
         # Plot traceplot of energies.
@@ -822,7 +843,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
         plt.xlabel('Sample', fontsize=14)
         plt.ylabel(r'Energy, $e(y, \tilde{y})$', fontsize=14)
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'mh_traceplot_energies.png'))
+        plt.savefig(os.path.join(save_dir, 'priv_sp_traceplot_energies.png'))
         plt.show()
 
         # Inspect correlation of energies.
@@ -840,74 +861,6 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method, num_y_tildes
     # --------------------------------------------------------------
 
     return y_tildes, energies, energy_estimation_errors
-
-
-def sample_sp_mmd_dp_bw(x, energy_power, dim, alpha, n, max_iter=5001, lr=5e-4,
-                        plot=False, use_mean=False):
-    """Compute private support points with MMD and private bandwidth.
-    
-    Sensitivity is of the median of pairwise distances, which can be the
-    span of the hypercube.
-    """
-    median_pairwise_dists = np.median(pdist(x, 'minkowski', p=energy_power))
-    sensitivity = dim ** (1. / energy_power) / 2.
-    
-    truth = median_pairwise_dists
-    plus_minus_one = 2 * np.random.binomial(1, p=0.5) - 1 
-    noise_mean = plus_minus_one * sensitivity / alpha
-    noise_natural = np.random.laplace(scale=sensitivity / alpha)
-    
-    if use_mean:
-        private_median = truth + noise_mean
-        if private_median <= 0:
-            # Assign arbitrary floor.
-            private_median = max(private_median, 1e-6)
-            print('Private median was negative, assigned 1e-6.')
-    else:
-        private_median = truth + noise_natural
-    assert private_median > 0, 'Private median must be > 0.'
-    
-    temp_y_opt_mmd, temp_mmd_opt = get_support_points(x, n, max_iter, lr,
-                                                      is_tf=True,
-                                                      plot=plot,
-                                                      do_mmd=True,
-                                                      mmd_sigma=private_median)
-
-    print('  [*] Alpha: {:.4f}, True median: {:.4f}, Sampled: {:.4f}'.format(
-        alpha, median_pairwise_dists, private_median))
-
-    return temp_y_opt_mmd, temp_mmd_opt
-
-
-
-# ----------------
-# TODO: DEPRECATE.
-def mixture_model_likelihood_mus_weights(x, mus, weights, sigma_data):
-    """Computes likelihood of data set, given cluster centers and weights.
-
-    Args:
-      x: NumPy array of raw, full data set.
-      mus: NumPy array of cluster centers.
-      weights: NumPy array of cluster weights.
-      sigma_data: Scalar bandwidth used to generate data.
-
-    Returns:
-      density: Scalar likelihood value for given data set.
-    """
-    dim = x.shape[1]
-    gaussians = [
-        multivariate_normal(mu, sigma_data * np.eye(dim)) for mu in mus]
-
-    def pt_likelihood(pt):
-        # Summation of weighted gaussians.
-        return sum(
-            [weight * gauss.pdf(pt) for weight, gauss in zip(weights,
-                                                             gaussians)])
-
-    pts_likelihood = np.prod([pt_likelihood(pt) for pt in x])
-
-    return pts_likelihood
-# ----------------
 
 
 def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
@@ -981,17 +934,18 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
         low = np.min(gmm_component_liks)
         high = np.max(gmm_component_liks)
 
-        plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
-            tag, len(x), bandwidth))
+        #plt.title('{} gmm component likelihoods: sorted, point-wise\n M={}, bw={:.5f}'.format(
+        #    tag, len(x), bandwidth))
         plt.xlabel('gmm components, sorted by lik', fontsize=14)
         plt.ylabel('lik', fontsize=14)
-        #plt.show()
+        plt.savefig('../output/mle_gmm_components.png')
+        plt.show()
 
         # Plot histogram of point likelihoods.
         plt.hist(liks)
         plt.title("likelihoods point-wise, bw={:.5f}, prod_lik={:3.3e}".format(
             bandwidth, prod_liks))
-        #plt.show()
+        plt.show()
 
 
     return likelihood, do_log
@@ -999,7 +953,8 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
 
 def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
                                     alpha, bandwidth, sample_size, plot=False,
-                                    tag='', method='mh', diffusion_mean=False):
+                                    tag='', method='mh',
+                                    power=None, set_seed=False):
     """Samples one full-size data set, given a bandwidth.
 
     Args:
@@ -1013,7 +968,8 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
       plot: Boolean, whether to plot.
       tag: String, names plot file.
       method: String, ['diffusion', 'mh'].
-      diffusion_mean: Picks mean instead of sampling from Exponential.
+      power: Int, power of energy metric. [1, 2]
+      set_seed: Boolean, if True, set seed before sample_sp_exp_mech.
 
     Return:
       y_tilde: NumPy array of sampled, private support points.
@@ -1021,11 +977,17 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
       y_tilde_expansion: NumPy array of upsampled points after adding noise.
     """
     ys, es, _ = sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt,
-                                   'diffusion', 1, alpha=alpha,
-                                   diffusion_mean=diffusion_mean)
+                                   method=method, num_y_tildes=1,
+                                   alpha=alpha,
+                                   power=power,
+                                   burnin=25000,
+                                   set_seed=set_seed)
     y_tilde = ys[0]
 
     # Sample from mixture model centered on noisy support points.
+    if isinstance(sample_size, float):
+        print(len(y_tilde), sample_size)
+        pdb.set_trace()
     choices = np.random.choice(range(len(y_tilde)), size=sample_size)
     y_tilde_upsampled = y_tilde[choices]
     y_tilde_upsampled_with_noise = (
@@ -1037,8 +999,8 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
     # Optionally plot results.
     if plot:
         plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3, label='data')
-        plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=0.7, 
-                    label='~sp(data)')
+        plt.scatter(y_tilde[:, 0], y_tilde[:, 1], c='red', alpha=1, 
+                    label='~sp(data)', marker='+')
         plt.scatter(y_tilde_expansion[:, 0], y_tilde_expansion[:, 1], c='blue', 
                     alpha=0.3, label='FULL')
 
@@ -1057,7 +1019,7 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
 
 def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2, 
                                    max_iter=500, learning_rate=1e-2,
-                                   energy_power=2., save_iter=[100],
+                                   power=1., save_iter=[100],
                                    clip=False):
     """Optimizes SP by resampling from known distribution each iter.
     
@@ -1094,7 +1056,7 @@ def sp_resample_known_distribution(known_dist_fn, M=100, N=10, DIM=2,
     tf_input_data = tf.placeholder(tf.float32, [M, DIM], name='input_data')
     tf_candidate_sp = tf.Variable(gen, name='sp', dtype=tf.float32)
 
-    tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=energy_power,
+    tf_e_out, _ = energy(tf_input_data, tf_candidate_sp, power=power,
                          is_tf=True, weights=exp_weights)
 
     opt = tf.train.AdamOptimizer(learning_rate)
