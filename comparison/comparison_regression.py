@@ -262,7 +262,10 @@ def diagnose_energy_chains(chains, burnin, thinning, num_supp, alpha, save_dir):
     gelman_rubin_stats = []
     running_betweens = []
     running_withins = []
-    for i in range(burnin + 5, n):
+
+    #for i in range(burnin + 5, n, 100):
+    range_i = np.arange(burnin + 5, n, 100)
+    for i in range_i:
         chains_so_far = chains[burnin:i, :]
 
         between_chain_var = np.var(np.mean(chains_so_far, axis=0), ddof=1)
@@ -275,12 +278,12 @@ def diagnose_energy_chains(chains, burnin, thinning, num_supp, alpha, save_dir):
         gelman_rubin_stat = az.rhat(chains_so_far)
         gelman_rubin_stats.append(gelman_rubin_stat)
 
-    ax[2].plot(gelman_rubin_stats)
+    ax[2].plot(range_i, gelman_rubin_stats)
     ax[2].set_xlabel('Iteration')
     ax[2].set_ylabel('Gelman-Rubin')
 
-    ax[3].plot(running_betweens, label='between')
-    ax[3].plot(running_withins, label='within')
+    ax[3].plot(range_i, running_betweens, label='between')
+    ax[3].plot(range_i, running_withins, label='within')
     ax[3].set_xlabel('Iteration')
     ax[3].set_ylabel('Variance')
     ax[3].legend()
@@ -295,7 +298,8 @@ def diagnose_energy_chains(chains, burnin, thinning, num_supp, alpha, save_dir):
     
 def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                     max_iter, lr, num_sp_samples, results_logfile=None,
-                    method='mh', burnin=5000, thinning=2000, num_cv_splits=None, power=None):
+                    method='mh', burnin=5000, thinning=2000, num_cv_splits=None,
+                    energy_power=None):
     """Runs panel of experiments for different number of support points
     and different alpha settings.
     
@@ -312,7 +316,7 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
         burnin: Int, number of samples to burn in MH sampler.
         thinning: Int, thinning gap in MH.
         num_cv_splits: Int, number of cross validation splits.
-        power: Int, power in energy metric. [1, 2]
+        energy_power: Int, power in energy metric. [1, 2]
       
     Returns:
         None
@@ -443,7 +447,8 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
             sp_sets = []
             for _ in range(num_sp_samples):
                 y_opt, e_opt = get_support_points(data, num_supp, max_iter, lr,
-                                                  is_tf=True, Y_INIT_OPTION='uniform',
+                                                  is_tf=True, energy_power=energy_power,
+                                                  Y_INIT_OPTION='uniform',
                                                   clip='data', plot=False)
                 sp_sets.append(y_opt)
             
@@ -463,13 +468,6 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                 with open(results_logfile, 'a') as f:
                     json.dump(sorted_dict(result), f)
                     f.write(os.linesep)
-
-
-            #e_rand = np.mean([energy(random_subsets_data[j], data, power=power)[0] for
-            #    j in range(len(random_subsets_data))])
-            #e_supp = np.mean([energy(sp_sets[j], data, power=power)[0] for
-            #    j in range(len(sp_sets))])
-            #print('num_supp={}, e_rand={:.8f}, e_supp={:.8f}'.format(num_supp, e_rand, e_supp))
 
 
         # ------------------------------------------
@@ -513,13 +511,16 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                              save_dir=save_dir,
                              plot=True,
                              burnin=burnin,
+                             power=energy_power,
                              return_chain=True)
                     priv_sp_sets.extend(private_sps)  # Extend, for flattened list.
                     chain_sets.append(energies_unthinned)
 
+
                 np.save(os.path.join(
                     save_dir,
                     'energy_chains_supp{}_eps{}.npy'.format(num_supp, alpha)), chain_sets)
+
                 diagnose_energy_chains(
                         chain_sets, burnin, thinning, num_supp, alpha, save_dir)
                 
@@ -563,7 +564,7 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                              data, M=num_supp, epsilon=alpha,
                              uniform_weights=True,  # Unweighted points.
                              save_dir='../results/regression_logs',
-                             plot=True)
+                             plot=False)
                     priv_kme_uniform_sets.append(private_kme_uniform)
 
                 # Test regression on private KME uniform points.
@@ -604,7 +605,7 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                              data, M=num_supp, epsilon=alpha,
                              uniform_weights=False,  # Weighted points.
                              save_dir='../results/regression_logs',
-                             plot=True)
+                             plot=False)
                     priv_kme_weighted_sets.append([points_, weights_])
 
                 # Test regression on private KME weighted points.
@@ -631,6 +632,54 @@ def run_experiments(dataset_name, data_orig, num_supp_list, alphas,
                     with open(results_logfile, 'a') as f:
                         json.dump(sorted_dict(result), f)
                         f.write(os.linesep)
+
+
+        # ----------------------------------------
+        # Test regression on NONPRIVATE KME WEIGHTED. 
+        # ----------------------------------------
+
+        # For each size of reduced set, compute nonprivate KME weighted points
+        # and test regression.
+        for num_supp in num_supp_list:
+
+            print('Starting nonprivate KME weighted, num_supp={}'.format(
+                num_supp, alpha))
+            _LOG.info('Starting nonprivate KME weighted, num_supp={}'.format(
+                num_supp, alpha))
+
+            # Compute nonprivate KME weight points.
+            nonpriv_kme_weighted_sets = []
+            for _ in range(num_sp_samples):
+                points_, weights_ = sample_kme_synthetic(
+                         data, M=num_supp, epsilon=alpha,
+                         uniform_weights=False,  # Weighted points.
+                         save_dir='../results/regression_logs',
+                         plot=False,
+                         no_noise=True)
+                nonpriv_kme_weighted_sets.append([points_, weights_])
+
+            # Test regression on nonprivate KME weighted points.
+            for nonpriv_kme_weighted_set in nonpriv_kme_weighted_sets:
+                points_, weights_ = nonpriv_kme_weighted_set
+
+                # Skip if weights are all negative or zero.
+                if np.all(weights_ <= 0.):
+                    _LOG.info(('Skipped nonprivate kme weighted: '
+                               'num_supp={}').format(num_supp, alpha))
+                    continue
+
+                mse = test_regression(
+                        points_, data_heldout, weights=weights_)
+                mmd = weighted_mmd(points_, data, weights=weights_)
+                result = {
+                        'dataset_name': dataset_name,
+                        'mse': mse,
+                        'mmd': mmd,
+                        'size': num_supp, 
+                        'tag': 'nonprivate_kme_weighted'}
+                with open(results_logfile, 'a') as f:
+                    json.dump(sorted_dict(result), f)
+                    f.write(os.linesep)
 
 
 def dict_filter_tag(rows, query, dataset, tag):
@@ -673,9 +722,14 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
     x = np.array(x_ticks)
     x_jitter = (max(x) - min(x)) / 40.
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, sharey=True, figsize=(15, 8))
-    #fig.suptitle(dataset_name)
+    # Set up side-by-side plots.
+    fig, (ax1, ax2) = plt.subplots(1, 2, sharey=True, figsize=(16, 6))
     
+    # Set linestyles for each alpha.
+    linestyles = [':', '--', '-']
+    assert len(linestyles) == len(alphas), 'num linestyles != num alphas'
+
+
     # -------------------------------------
     # Make boxplot for full-size sets.
     # -------------------------------------
@@ -704,7 +758,7 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
 
 
     # ------------------------------------------------------------
-    # Then make line plot with error bars for variably-sized runs.
+    # Make line plot with error bars for variably-sized runs.
     # ------------------------------------------------------------
     
     """
@@ -731,6 +785,7 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
     ax2.errorbar(x, pct50, yerr=[pct25, pct75], label='random_subset')
     """
 
+
     ###############
     # Support points.
     mses = []
@@ -750,12 +805,14 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
         pct75.append(np.percentile(res, 75))
     
     ax2.set_ylim(0,1)
-    ax2.errorbar(x + 1 * x_jitter,
+    ax2.errorbar(x - 0.01,
                  pct50,
                  yerr=[pct25, pct75],
-                 label='support_points',
-                 marker='x')
+                 label='sp',
+                 color='gray',
+                 linestyle='-')
         
+
     ###############
     # Private support points.
     for i, alpha in enumerate(alphas):
@@ -777,38 +834,41 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
             pct75.append(np.percentile(res, 75))
 
         ax2.set_ylim(0,1)
-        ax2.errorbar(x + 2 * x_jitter + i * x_jitter,
+        ax2.errorbar(x - 0.01 + 0.02 / 12 * (i + 1),
                      pct50,
                      yerr=[pct25, pct75],
                      label=r'sp, $\alpha={}$'.format(alpha),
-                     marker='^')
+                     color='red',
+                     marker='o',
+                     linestyle=linestyles[i])
+
 
     ###############
-    # Private KME uniform synthetic.
-    for i, alpha in enumerate(alphas):
-        mses = []
-        stds = []
-        pct25 = []
-        pct50 = []
-        pct75 = []
-        for size in sizes:
-            res = [d['mse'] for d in results if
-                   d['tag'] == 'private_kme_uniform' and
-                   d['size'] == size and
-                   d['alpha'] == alpha]
-            
-            mses.append(np.mean(res))
-            stds.append(np.std(res))
-            pct25.append(np.percentile(res, 25))
-            pct50.append(np.percentile(res, 50))
-            pct75.append(np.percentile(res, 75))
+    # Nonprivate KME weighted synthetic.
+    mses = []
+    stds = []
+    pct25 = []
+    pct50 = []
+    pct75 = []
+    for size in sizes:
+        res = [d['mse'] for d in results if
+               d['tag'] == 'nonprivate_kme_weighted' and
+               d['size'] == size]
+        
+        mses.append(np.mean(res))
+        stds.append(np.std(res))
+        pct25.append(np.percentile(res, 25))
+        pct50.append(np.percentile(res, 50))
+        pct75.append(np.percentile(res, 75))
 
-        ax2.set_ylim(0,1)
-        ax2.errorbar(x + 3 * x_jitter + i * x_jitter,
-                     pct50,
-                     yerr=[pct25, pct75],
-                     label=r'kme_uniform, $\alpha={}$'.format(alpha),
-                     marker='+')
+    ax2.set_ylim(0,1)
+    ax2.errorbar(x - 0.01 + 0.02 / 12 * (i + 4),
+                 pct50,
+                 yerr=[pct25, pct75],
+                 label=r'kme_wt',
+                 color='black',
+                 marker='o',
+                 linestyle=linestyles[i])
 
 
     ###############
@@ -832,11 +892,45 @@ def plot_final_results(results_logfile, dataset_name, x_ticks, alphas):
             pct75.append(np.percentile(res, 75))
 
         ax2.set_ylim(0,1)
-        ax2.errorbar(x + 3 * x_jitter + i * x_jitter,
+        ax2.errorbar(x - 0.01 + 0.02 / 12 * (i + 7),
                      pct50,
                      yerr=[pct25, pct75],
-                     label=r'kme_weighted, $\alpha={}$'.format(alpha),
-                     marker='o')
+                     label=r'kme_wt, $\alpha={}$'.format(alpha),
+                     color='green',
+                     marker='o',
+                     linestyle=linestyles[i])
+
+
+    ###############
+    # Private KME uniform synthetic.
+    for i, alpha in enumerate(alphas):
+        mses = []
+        stds = []
+        pct25 = []
+        pct50 = []
+        pct75 = []
+        for size in sizes:
+            res = [d['mse'] for d in results if
+                   d['tag'] == 'private_kme_uniform' and
+                   d['size'] == size and
+                   d['alpha'] == alpha]
+            
+            mses.append(np.mean(res))
+            stds.append(np.std(res))
+            pct25.append(np.percentile(res, 25))
+            pct50.append(np.percentile(res, 50))
+            pct75.append(np.percentile(res, 75))
+
+        ax2.set_ylim(0,1)
+        ax2.errorbar(x - 0.01 + 0.02 / 12 * (i + 10),
+                     pct50,
+                     yerr=[pct25, pct75],
+                     label=r'kme_unif, $\alpha={}$'.format(alpha),
+                     color='blue',
+                     marker='o',
+                     linestyle=linestyles[i])
+
+
 
     # ------------------------------------    
     
@@ -859,15 +953,18 @@ def main():
     run_diabetes = 1
     run_california = 1
 
+    energy_power = 1
+
     alphas = [10 ** p for p in [2, 3, 4]]  # [2, 3, 4, 5], [5, 4, 3, 2]
-    num_sp_samples = 5  # 10
+    num_sp_samples = 5  # 5 
     num_cv_splits = 5  # 5
 
-    power = 1
+    assert num_sp_samples >= 2, 'num_sp_samples must be 2+ for convergence diagnostics'
 
-    plot_only = True
+    plot_only = True 
     if plot_only:
-        print('Only plotting existing results.')
+        print('STARTING PLOT-ONLY SEQUENCE')
+        results_logfile = '../results/regression_logs/oct9/results.log'
         percent_num_supp = [0.05, 0.1, 0.2]
         plot_final_results(results_logfile, 'boston', percent_num_supp, alphas)
         plot_final_results(results_logfile, 'diabetes', percent_num_supp, alphas)
@@ -905,7 +1002,7 @@ def main():
     if run_boston:
         run_experiments(dataset_name, data, num_supp_list, alphas, max_iter, lr,
                 num_sp_samples, results_logfile=results_logfile, burnin=burnin,
-                num_cv_splits=num_cv_splits, power=power)
+                num_cv_splits=num_cv_splits, energy_power=energy_power)
     if run_boston:
         plot_final_results(results_logfile, 'boston', percent_num_supp, alphas)
 
@@ -937,7 +1034,7 @@ def main():
     if run_diabetes:
         run_experiments(dataset_name, data, num_supp_list, alphas, max_iter, lr,
                 num_sp_samples, results_logfile=results_logfile, burnin=burnin,
-                num_cv_splits=num_cv_splits, power=power)
+                num_cv_splits=num_cv_splits, energy_power=energy_power)
     if run_diabetes:
         plot_final_results(results_logfile, 'diabetes', percent_num_supp, alphas)
 
@@ -969,7 +1066,7 @@ def main():
     if run_california:
         run_experiments(dataset_name, data, num_supp_list, alphas, max_iter, lr,
                 num_sp_samples, results_logfile=results_logfile, burnin=burnin,
-                num_cv_splits=num_cv_splits, power=power)
+                num_cv_splits=num_cv_splits, energy_power=energy_power)
     if run_california:
         plot_final_results(results_logfile, 'california', percent_num_supp, alphas)
 

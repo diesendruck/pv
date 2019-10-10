@@ -51,7 +51,7 @@ def weighted_mmd(synthetic, data, kernel=None, K_xx_mean=None, weights=None):
 def sample_kme_synthetic(
         X_private, M=None, epsilon=None, J=10000, num_iters=100,
         lr=0.5, lasso_alpha=1., lengthscale=0.5, uniform_weights=False,
-        plot=False, save_dir=None):
+        plot=False, save_dir=None, no_noise=False):
     """Computes synthetic set via private kernel mean embeddings.
 
     Args:
@@ -65,6 +65,7 @@ def sample_kme_synthetic(
       uniform_weights (boolean): Use uniform weights in synthetic pt optim.
       plot (boolean): To plot or not to plot.
       save_dir (string): Directory for plots.
+      no_noise (boolean): If True, don't add noise.
 
     Returns:
       Z (numpy array): Synthetic points.
@@ -97,7 +98,10 @@ def sample_kme_synthetic(
     # construct M synthetic points) to approximate empirical_public
     Z = np.zeros((M, D))
     betas = []
-    Psi = empirical_public
+    if no_noise:
+        Psi = empirical_private
+    else:
+        Psi = empirical_public
     for m in range(M):
         # Initialize and optimise location z with Torch
         zTorch = Variable(torch.from_numpy(Z_initial[m]),
@@ -149,12 +153,20 @@ def sample_kme_synthetic(
             ax.annotate(round(txt, 2), (Z[j, 0], Z[j, 1]))
         ax.set_title('num_data={}, num_supp={}, eps={}\nd_kme={:.5f}'.format(
             N, M, epsilon, dist_k_opt))
-        plt.savefig(os.path.join(save_dir, 'balog_eps{}.png'.format(epsilon)))
+        plt.savefig(os.path.join(save_dir,
+            'balog_eps{}_unifwt{}_nonoise{}.png'.format(
+                epsilon,
+                int(uniform_weights),
+                int(no_noise))))
         plt.close()
     elif plot and X_private.shape[1] > 2:
         pd.plotting.scatter_matrix(pd.DataFrame(Z), c='blue')
         plt.suptitle('num_supp={}, eps={}'.format(M, epsilon))
-        plt.savefig(os.path.join(save_dir, 'balogZ_eps{}.png'.format(epsilon)))
+        plt.savefig(os.path.join(save_dir,
+            'balogZ_eps{}_unifwt{}_nonoise{}.png'.format(
+                epsilon,
+                int(uniform_weights),
+                int(no_noise))))
         plt.close()
 
 

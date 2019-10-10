@@ -22,8 +22,8 @@ def scale_01(data):
     return data
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
-                       Y_INIT_OPTION='uniform', clip='bounds', do_wlb=False,
-                       plot=True, do_mmd=False, mmd_sigma=None):
+                       energy_power=None, Y_INIT_OPTION='uniform', clip='bounds',
+                       do_wlb=False, plot=True, do_mmd=False, mmd_sigma=None):
     """Initializes and gets support points.
     
     Args:
@@ -32,6 +32,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
       max_iter: Scalar, number of times to loop through updates for all vars.
       lr: Scalar, amount to move point with each gradient update.
       is_tf: Boolean, chooses TensorFlow optimization.
+      energy_power: Int, power in energy metric. [1, 2]
       clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
         are [0,1].
       do_wlb: Boolean, chooses to use Exponential random weight for 
@@ -90,6 +91,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
     # Optimize particles for each dataset (x0 and x1).
     y_opt, e_opt = optimize_support_points(x, y, max_iter=max_iter,
                                            learning_rate=lr, is_tf=is_tf,
+                                           energy_power=energy_power,
                                            #save_iter=[int(max_iter / 2), max_iter - 1],  # PICK A SAVE_ITER.
                                            #save_iter=[5, 10, 50, 100, max_iter - 1],
                                            #save_iter=max_iter - 1,
@@ -107,7 +109,7 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
 
 def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
-                            is_tf=False, energy_power=2., save_iter=100,
+                            is_tf=False, energy_power=None, save_iter=100,
                             clip='bounds', do_wlb=False, do_mmd=False,
                             mmd_sigma=None, plot=True):
     """Runs TensorFlow optimization, n times through proposal points.
@@ -118,6 +120,7 @@ def optimize_support_points(data, gen, max_iter=500, learning_rate=1e-2,
       max_iter: Scalar, number of times to loop through updates for all vars.
       learning_rate: Scalar, amount to move point with each gradient update.
       is_tf: Boolean, chooses TensorFlow optimization.
+      energy_power: Int, power in energy metric. [1, 2]
       clip: Chooses how to clip SPs. [None, 'data', 'bounds'], where bounds 
         are [0,1].
       do_wlb: Boolean, chooses to use Exponential random weight for 
@@ -373,6 +376,8 @@ def energy(data, gen, power=2., is_tf=False, weights=None, return_k=False):
              1. / m / m * tf.reduce_sum(K_xx) -
              1. / n / n * tf.reduce_sum(K_yy))
 
+        e = tf.sqrt(e)
+
         gradients_e = None
     
     
@@ -404,6 +409,8 @@ def energy(data, gen, power=2., is_tf=False, weights=None, return_k=False):
         e = (2. / gen_num / data_num * np.sum(K_xy) -
              1. / data_num / data_num * np.sum(K_xx) -
              1. / gen_num / gen_num * np.sum(K_yy))
+
+        e = np.sqrt(e)
             
         
         # TODO: COMPUTE GRADIENTS FOR WEIGHTED DATA.
@@ -431,6 +438,7 @@ def energy(data, gen, power=2., is_tf=False, weights=None, return_k=False):
         grad_matrix_yx = grad_matrix[data_num:, :data_num]
         grad_matrix_yy = grad_matrix[data_num:, data_num:]
 
+        # TODO: If using sqrt(e), then gradients must be updated.
         gradients_e = np.zeros((gen_num, dim))
         for i in range(gen_num):
             grad_yi = (2. / data_num / gen_num * np.sum(grad_matrix_yx[i],
@@ -581,7 +589,7 @@ def plot_nd(d, w=10, h=10, title=None):
 
 def sample_sp_exp_mech(
         x, num_supp, alpha=None, save_dir=None, plot=False, burnin=5000,
-        thinning=2000, power=1, max_iter=301, lr=1e-2, return_chain=False,
+        thinning=1000, power=1, max_iter=301, lr=1e-2, return_chain=False,
         y_init='uniform'):
     """Samples in space of support points.
 
@@ -603,10 +611,11 @@ def sample_sp_exp_mech(
       y_tilde: NumPy array, sampled support point sets.
       energy: Float, energy associated with sampled sets.
     """
-    num_y_tildes = 20  # TODO: Change this to more for convergence diagnostics.
+    num_y_tildes = 10  # TODO: Change this to more for convergence diagnostics.
 
     # Get optimal support points.
-    y_opt, e_opt = get_support_points(x, num_supp, max_iter, lr, is_tf=True)
+    y_opt, e_opt = get_support_points(x, num_supp, max_iter, lr, is_tf=True,
+                                      energy_power=power)
 
     # Define energy sensitivity for Exponential Mechanism.
     energy_sensitivity = get_energy_sensitivity(x, num_supp, power=power)
@@ -646,7 +655,8 @@ def sample_sp_exp_mech(
     energy_t, _ = energy(y_t, y_opt, power=power)
 
     # Create containers for markov chain results.
-    y_mh = np.zeros(shape=(chain_length, y_opt.shape[0], y_opt.shape[1]))
+    y_mh = np.zeros(shape=(chain_length, y_opt.shape[0], y_opt.shape[1]),
+                    dtype=np.float32)
     ratios_unthinned = np.zeros(chain_length)
     acceptance_rates = np.zeros(chain_length)
     energies_unthinned = np.zeros(chain_length)
