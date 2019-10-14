@@ -927,6 +927,7 @@ def sample_sp_exp_mech_gridwalk(energy_sensitivity, y_opt, x, alpha=None, power=
     num_steps = np.int(np.ceil(
         16 * np.exp(4) * (gw_dim ** 2) * (L ** 2) * np.exp(2 * beta) *
         (np.log(np.exp(2) / dp_delta) + np.log(1. / q_x0))))
+    print('Num steps for ({}, {})-approxDP = {}'.format(alpha, dp_delta, num_steps))
     
     # Helper for energy updates.
     diff_factor = alpha / (2. * energy_sensitivity)
@@ -980,7 +981,7 @@ def sample_sp_exp_mech_gridwalk(energy_sensitivity, y_opt, x, alpha=None, power=
         # Otherwise reject and continue.    
         
         # Plot occasionally.
-        if i % 100000 == 0:
+        if i % 1000000 == 0:
             plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
                         label='data')
             plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
@@ -993,10 +994,9 @@ def sample_sp_exp_mech_gridwalk(energy_sensitivity, y_opt, x, alpha=None, power=
             plt.gca().set_aspect('equal', adjustable='box')
             plt.tight_layout()
             plt.savefig('../output/priv_sp_sample_gridwalk.png')
-            #plt.show()
+            plt.show()
             plt.close()
-    print('exited loop')
-    pdb.set_trace()
+
     return y_t, energy_t
     
     
