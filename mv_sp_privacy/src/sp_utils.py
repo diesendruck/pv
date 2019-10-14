@@ -652,8 +652,8 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
         chain_length, burnin, thinning))
 
     # Initialize the support points Y_t.
-    #y_t = np.random.uniform(size=y_opt.shape)
-    y_t = y_opt
+    y_t = np.random.uniform(size=y_opt.shape)
+    #y_t = y_opt
 
     # Choose distance metric, and compute initial value.
     if do_mmd:
@@ -864,6 +864,142 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
     return y_tildes, energies, energy_estimation_errors
 
 
+def sample_sp_exp_mech_gridwalk(energy_sensitivity, y_opt, x, alpha=None, power=None):
+    """Samples in space of support points.
+
+    For data points in R^d, energy power p, and num support points N, energy
+    sensitivity U = 2 * d^(1 / p) * (2N - 1) / N^2. Grid-Walk samples proportional
+    to F(y_t), where:
+
+    F(y_t) = exp(-a / (2U) * e(y_t, y_opt)).
+
+    Proposals during sampling are coordinate-wise, e.g. 10, 2-dim points make a
+    20-dimensional input, where one component is perturbed at a time.
+
+    L is the Lipschitz constant for f(y_t), where:
+
+    f(y_t) = ln(F(y_t) = -a / (2U) * e(y_t, y_opt)
+
+    and
+
+    |f(y) - f(y')| <= L * (max_i |y_i - y'_i|)
+
+    Changing a single component changes e() by a max of 2 * (2N - 1) / N^2.
+    Combining with the rest of f(), f() changes by a max of
+    -a / (2U) * 2 * (2N - 1) / N^2. Substituting in the value of U, f() changes
+    by a max absolute amount L, where:
+
+    L = a / (2 * d^(1 / p)).
+
+    Cube size in Grid-Walk is 1 / ceil(L). For a=1000, d=2, p=2,
+
+    1 / ceil(L) = 1 / ceil(1000 / (2 * 2^(1 / 2))) = 1 / 354.
+
+
+    Args:
+      energy_sensitivity: Sensitivity, based on user-selected privacy budget.
+      y_opt: NumPy array, optimal support points.
+      x: NumPy array, data.
+      alpha: Float, privacy budget.
+      power: Int, power in energy metric.
+
+    Returns:
+      y_tilde: NumPy array, sampled support point set.
+    """
+
+    # Define L.
+    dim = y_opt.shape[1]
+    L = alpha / (2 * dim ** (1 / power))
+    cube_size = 1. / np.ceil(L)
+    grid = np.linspace(cube_size / 2, 1 - cube_size / 2, num=1 / cube_size)
+    
+    # Choose random starting point. dim random coordinates for each of 
+    num_supp = y_opt.shape[0]
+    gw_dim = num_supp * dim
+    y_t = np.array(
+        [np.random.choice(grid) for _ in range(gw_dim)]).reshape(num_supp, dim)
+    energy_t, _ = energy(y_t, y_opt, power=power)
+    
+    # Compute number of steps to take
+    beta = 0.
+    dp_delta = 1. / num_supp
+    q_x0 = 1. / (len(grid) ** gw_dim)
+    num_steps = np.int(np.ceil(
+        16 * np.exp(4) * (gw_dim ** 2) * (L ** 2) * np.exp(2 * beta) *
+        (np.log(np.exp(2) / dp_delta) + np.log(1. / q_x0))))
+    
+    # Helper for energy updates.
+    diff_factor = alpha / (2. * energy_sensitivity)
+
+    
+    # Run the sampler.
+    for i in range(num_steps):
+        
+        # With probability 1/2, do not move.
+        if np.random.uniform() < 0.5:
+            continue
+
+        # Otherwise, propose move to adjacent block, and move if valid.
+        # Randomly select which component to perturb.
+        x_ind = np.random.choice(range(num_supp))
+        y_ind = np.random.choice(range(dim))
+        direction = np.random.choice([-1, 1])
+        new_val = y_t[x_ind][y_ind] + direction * cube_size
+        if new_val < 0. or new_val > 1.:
+            continue
+        
+        # Copy y_t and apply new value to candidate.
+        y_t_candidate = np.copy(y_t)
+        y_t_candidate[x_ind][y_ind] = new_val
+
+        # Compute the acceptance ratio,
+        #          F(y_t_candidate)     exp(- a / (2U) * e_t')
+        # ratio = ------------------ = ------------------------ = exp( a / (2U) * (e_t - e_t'))
+        #          F(y_t)               exp(- a / (2U) * e_t)
+        # using difference in energy. Since only one point changes, only compute
+        # that part of the Gram matrix "K". Below, "cc" indicates the portion of K
+        # between candidate and candidate, and "co" ... between candidate and optimal.
+        update_ind = x_ind
+        K_cc_old = [np.linalg.norm(y_t[update_ind] - y_t[ind], ord=power) for ind in range(len(y_t))]
+        K_co_old = [np.linalg.norm(y_t[update_ind] - y_opt[ind], ord=power) for ind in range(len(y_opt))]
+        
+        K_cc_new = [np.linalg.norm(y_t_candidate[update_ind] - y_t_candidate[ind], ord=power) for ind in range(len(y_t))]
+        K_co_new = [np.linalg.norm(y_t_candidate[update_ind] - y_opt[ind], ord=power) for ind in range(len(y_opt))]
+        
+        part_e_old = (2. / (len(y_opt) ** 2)) * (np.sum(K_co_old) - np.sum(K_cc_old))
+        part_e_new = (2. / (len(y_opt) ** 2)) * (np.sum(K_co_new) - np.sum(K_cc_new))
+        
+        energy_diff = part_e_new - part_e_old
+        energy_t_candidate = energy_t + energy_diff
+        ratio = np.exp(diff_factor * -1. * energy_diff)
+
+        # Accept or reject the candidate.
+        if np.random.uniform() < ratio:    # Accept.
+            y_t = y_t_candidate
+            energy_t = energy_t_candidate
+        # Otherwise reject and continue.    
+        
+        # Plot occasionally.
+        if i % 100000 == 0:
+            plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
+                        label='data')
+            plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
+                        label='sp(data)')
+            plt.scatter(y_t[:, 0], y_t[:, 1], c='red', alpha=1,
+                        label='~sp(data)', marker='+')
+            plt.xlim(0, 1)
+            plt.ylim(0, 1)
+            plt.title('iter {}, e={:.4f}'.format(i, energy_t))
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.tight_layout()
+            plt.savefig('../output/priv_sp_sample_gridwalk.png')
+            #plt.show()
+            plt.close()
+    print('exited loop')
+    pdb.set_trace()
+    return y_t, energy_t
+    
+    
 def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
                              plot=False):
     """Computes likelihood of data set, given cluster centers and bandwidth.
