@@ -22,7 +22,7 @@ def scale_01(data):
     return data
 
 def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
-                       power=None, Y_INIT_OPTION='radial',
+                       power=None, y_init_option='random',
                        clip='bounds', do_wlb=False,
                        plot=True, do_mmd=False, mmd_sigma=None):
     """Initializes and gets support points.
@@ -49,13 +49,13 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
 
         
     print('\nSTARTING RUN. is_tf: {}, y_init: {}, clip: {}, wlb: {}'.format(
-        is_tf, Y_INIT_OPTION, clip, do_wlb))
+        is_tf, y_init_option, clip, do_wlb))
     
     # Initialize generated particles for both sets (y and y_).
     d = x.shape[1]
     offset = 0.1 * (np.max(x) - np.min(x))
 
-    if Y_INIT_OPTION == 'grid':
+    if y_init_option == 'grid':
         grid_size = int(np.sqrt(num_support))
         assert grid_size == np.sqrt(num_support), \
             'num_support must square for grid'
@@ -65,13 +65,13 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
         # Perturb grid in order to give more diverse gradients.
         y += np.random.normal(0, 0.005, size=y.shape)
 
-    elif Y_INIT_OPTION == 'random':
+    elif y_init_option == 'random':
         #y = np.random.uniform(offset, 1 - offset, size=(num_support, d))
         offset = 0.1 * (np.max(x) - np.min(x))
         y = np.random.uniform(np.min(x) + offset, np.max(x) - offset,
                               size=(num_support, d))
 
-    elif Y_INIT_OPTION == 'radial':
+    elif y_init_option == 'radial':
         positions = np.linspace(0,
                                 (2 * np.pi) * num_support / (num_support + 1),
                                 num_support)
@@ -79,12 +79,12 @@ def get_support_points(x, num_support, max_iter=1000, lr=1e-2, is_tf=False,
              rad in positions]
         y = np.array(y)
         
-    elif Y_INIT_OPTION == 'subset':
+    elif y_init_option == 'subset':
         y = x[np.random.randint(len(x), size=num_support)] + \
             np.random.normal(0, 0.0001, size=[num_support, x.shape[1]])
         #y = np.array(x[np.random.randint(len(x), size=num_support)])
         
-    elif Y_INIT_OPTION == 'uniform':
+    elif y_init_option == 'uniform':
         y = np.random.uniform(np.min(x), np.max(x), size=[num_support, x.shape[1]])
         
     # For MMD, must supply sigma.
@@ -364,6 +364,7 @@ def energy(data, gen, power=None, is_tf=False, weights=None, return_k=False):
         
         # Build kernel matrix, and optionally multiple by data weights.
         K = tf.norm(pairwise_difs, axis=2, ord=power)
+        #K = tf.pow(tf.norm(pairwise_difs, axis=2, ord='euclidean'), power)  # TODO: testing new norm strategy
         K = tf.matrix_set_diag(K, tf.zeros(tf.shape(v)[0]))  # Zero-out diagonal.
         if weights is not None:
             weights = tf.constant(weights)
@@ -381,7 +382,7 @@ def energy(data, gen, power=None, is_tf=False, weights=None, return_k=False):
              1. / m / m * tf.reduce_sum(K_xx) -
              1. / n / n * tf.reduce_sum(K_yy))
         
-        e = tf.sqrt(e)  # TODO: Testing.
+        #e = tf.sqrt(e)  # TODO: Testing.
 
         gradients_e = None
     
@@ -415,7 +416,7 @@ def energy(data, gen, power=None, is_tf=False, weights=None, return_k=False):
              1. / data_num / data_num * np.sum(K_xx) -
              1. / gen_num / gen_num * np.sum(K_yy))
         
-        e = np.sqrt(e)  # TODO: Testing.
+        #e = np.sqrt(e)  # TODO: Testing.
         
         
         # TODO: COMPUTE GRADIENTS FOR WEIGHTED DATA.
@@ -980,7 +981,7 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
                                    method=method, num_y_tildes=1,
                                    alpha=alpha,
                                    power=power,
-                                   burnin=25000,
+                                   burnin=5000,
                                    set_seed=set_seed)
     y_tilde = ys[0]
 
