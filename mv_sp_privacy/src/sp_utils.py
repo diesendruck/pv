@@ -981,7 +981,7 @@ def sample_sp_exp_mech_gridwalk(energy_sensitivity, y_opt, x, alpha=None, power=
         # Otherwise reject and continue.    
         
         # Plot occasionally.
-        if i % 1000000 == 0:
+        if i % int(num_steps / 1000000) == 0:
             plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
                         label='data')
             plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
@@ -993,9 +993,8 @@ def sample_sp_exp_mech_gridwalk(energy_sensitivity, y_opt, x, alpha=None, power=
             plt.title('iter {}, e={:.4f}'.format(i, energy_t))
             plt.gca().set_aspect('equal', adjustable='box')
             plt.tight_layout()
-            plt.savefig('../output/priv_sp_sample_gridwalk.png')
+            plt.savefig('../output/priv_sp_sample_gridwalk_{}.png'.format(i))
             plt.show()
-            plt.close()
 
     return y_t, energy_t
     
