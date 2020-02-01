@@ -55,7 +55,7 @@ def load_balog_data(M, DIM, C, SIGMA, make_new=False, do_weighted=False):
        dimension, num clusters, and cluster variance.
     """
     # np.random.seed(0)
-    DATA_PATH = '../data/mixture_of_Gaussians_M{}_D{}_C{}_SIG{}.npz'. format(M, DIM, C, SIGMA)
+    DATA_PATH = '/Users/swilliamson/Work/Mo/pv/mv_sp_privacy/src/data/mixture_of_Gaussians_M{}_D{}_C{}_SIG{}.npz'. format(M, DIM, C, SIGMA)
     
     if not os.path.exists(DATA_PATH) or make_new:
         # Generate the private data
@@ -66,7 +66,7 @@ def load_balog_data(M, DIM, C, SIGMA, make_new=False, do_weighted=False):
     
         # Save the generated data
         dataset_name = 'mixture_of_Gaussians'
-        path_save = '../data/{}_M{}_D{}_C{}_SIG{}'.format(
+        path_save = '/Users/swilliamson/Work/Mo/pv/mv_sp_privacy/src/data/{}_M{}_D{}_C{}_SIG{}'.format(
             dataset_name, M, DIM, C, SIGMA)
         np.savez(path_save + '.npz', X_private=x)
         json_dump({'dataset': dataset_name,

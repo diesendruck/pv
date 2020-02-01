@@ -565,23 +565,22 @@ def mmd(data, gen, sigma=1., is_tf=False, weights=None):
         return mmd, gradients_mmd
 
 
-def get_energy_sensitivity(data, reference_size, power=None):
+def get_energy_sensitivity(N, D, power=None):
     """Computes energy sensitivity.
 
     Args:
-        data (array): Data set, from which dimension will be computed.
-        reference_size (int): Number of points in reference set (either
+        N: Number of points in reference set (either
           data size, or SP size if comparing to SP.
+        D: Dimension of each data point (i.e. data.shape[1]
+        power: power
 
     Returns:
         energy_sensitivity (float): Sensitivity value.
     """
     assert power is not None, 'power is None. Define it.'
-    dim = data.shape[1]
-
     # Define energy sensitivity for Exponential Mechanism.
     energy_sensitivity = (
-        2 * dim ** (1. / power) * (2 * reference_size - 1) / reference_size ** 2)
+        2 * D ** (1. / power) * (2 * N - 1) / N ** 2)
     
     return energy_sensitivity
 
@@ -593,17 +592,18 @@ def plot_nd(d, w=10, h=10, title=None):
     #plt.show()
 
 
-def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_tildes=1,
+def sample_sp_exp_mech(energy_sensitivity, data, num_support_points, 
+                       method='mh', num_y_tildes=1,
                        alpha=None, plot=False, do_mmd=False,
                        mmd_sigma=None, burnin=5000, thinning=2000, partial_update=True,
-                       save_dir=None, power=None, set_seed=False):
+                       save_dir=None, power=None, set_seed=False, max_step_size=0.25,
+                       initial_step_size=1e-2, optimal_support_points=None):
     """Samples in space of support points.
 
     Args:
-      e_opt: Energy distance between optimal support points and data.
       energy_sensitivity: Sensitivity, based on user-selected privacy budget.
-      x: NumPy array, data.
-      y_opt: NumPy array, optimal support points.
+      data: NumPy array, original data, pre-scaled to have bounds 0,1 in all dimensions (or pre-chosen support points) -- NxD. 
+      num_support_points: Number of support points to use.
       method: String, indicates which sampling method to use.
       num_y_tildes: Samples of support points to draw.
       alpha: Float, privacy budget.
@@ -616,6 +616,11 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
       save_dir: String, location to save plots.
       power: Int, power in energy metric.
       set_seed: Boolean, whether to set seed before sampling.
+      max_step_size: max step size for MH.
+      initial_step_size: initial step size for MH
+      optimal_support_points: optimal support points (only used for plotting)
+      original_data: original data set (only used for plotting, if none then use data)
+
 
     Returns:
       y_tildes: NumPy array, sampled support point sets.
@@ -627,6 +632,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
     
     if do_mmd:
         print('[*] Using MMD as distribution distance.')
+
     
     sensitivity_string = ('\nPr(e) = a / (2U) * exp(- a / (2U) * e) '
                           '~ Exp(2U/a) = Exp(2 * {:.4f} / {:.3f}) = '
@@ -634,36 +640,39 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
                                                  alpha,
                                                  2 * energy_sensitivity / alpha))
     print(sensitivity_string)
-        
+
+    
         
     # --------------------------------------------------------------
-    # Sample support points.     
-    # Let Y* be optimal support points. Initialize Y_t as Y*. Let
+    # Sample support points.
+    # Initialize Y_t randomly.  Let
     # Y_t' = Y_t + random walk noise. For differential privacy level a
     # and sensitivity U, let acceptance ratio of Y_t' be
     #   \gamma = exp(a / (2U) * [e(Y_t, Y*) - e(Y_t', Y*)]).
     # Then accept Y_t' with probability min(1, \gamma).
 
     # Choose setup for Metropolis-Hastings.
-    max_step_size = 0.25 * (np.max(x) - np.min(x))
-    step_size = 1e-2
+    
+    
+    step_size = initial_step_size
     chain_length = burnin + thinning * num_y_tildes
     print('Running chain. Length={}, Burn={}, Thin={}'.format(
         chain_length, burnin, thinning))
 
     # Initialize the support points Y_t.
-    y_t = np.random.uniform(size=y_opt.shape)
+    N, D = data.shape
+    y_t = np.random.uniform(size=(num_support_points, D))
     #y_t = y_opt
 
     # Choose distance metric, and compute initial value.
     if do_mmd:
-        energy_t, _ = mmd(y_t, y_opt, sigma=mmd_sigma)
+        energy_t, _ = mmd(y_t, data, sigma=mmd_sigma)
     else:
-        energy_t, _ = energy(y_t, y_opt, power=power)
+        energy_t, _ = energy(y_t, data, power=power) # TODO: check that energy and MMD work with different sized objects (should do...)
 
         
     # Create containers for markov chain results.
-    y_mh = np.zeros(shape=(chain_length, y_opt.shape[0], y_opt.shape[1]))
+    y_mh = np.zeros(shape=(chain_length, num_support_points, D))
     ratios_unthinned = np.zeros(chain_length)
     acceptance_rates = np.zeros(chain_length)
     energies_unthinned = np.zeros(chain_length)
@@ -682,6 +691,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
         np.random.seed(234)
     
     # Run chain.
+    
     for i in range(chain_length):
         
         if partial_update:
@@ -689,6 +699,7 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
             update_i = i % len(y_t)
             y_t_candidate = np.copy(y_t)
             y_t_candidate[update_i] += np.random.normal(scale=step_size, size=y_t.shape[1])
+            
         else:
             # Add random walk noise to current set of support points.
             y_update = np.random.normal(scale=step_size, size=y_t.shape)
@@ -717,16 +728,18 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
         #... another update for oc.
         """
         
-        K_cc_old = [np.linalg.norm(y_t[update_i] - y_t[i], ord=power) for i in range(len(y_t))]
-        K_co_old = [np.linalg.norm(y_t[update_i] - y_opt[i], ord=power) for i in range(len(y_opt))]
+        K_cc_old = [np.linalg.norm(y_t[update_i] - y_t[i], ord=power) for i in range(num_support_points)]
+        K_co_old = [np.linalg.norm(y_t[update_i] - data[i], ord=power) for i in range(N)]
         
-        K_cc_new = [np.linalg.norm(y_t_candidate[update_i] - y_t_candidate[i], ord=power) for i in range(len(y_t))]
-        K_co_new = [np.linalg.norm(y_t_candidate[update_i] - y_opt[i], ord=power) for i in range(len(y_opt))]
+        K_cc_new = [np.linalg.norm(y_t_candidate[update_i] - y_t_candidate[i], ord=power) for i in range(num_support_points)]
+        K_co_new = [np.linalg.norm(y_t_candidate[update_i] - data[i], ord=power) for i in range(N)]
         
-        part_e_old = (2. / (len(y_opt) ** 2)) * (np.sum(K_co_old) - np.sum(K_cc_old))
-        part_e_new = (2. / (len(y_opt) ** 2)) * (np.sum(K_co_new) - np.sum(K_cc_new))
-        
-        
+        part_e_old = (2. / (num_support_points * N)) * np.sum(K_co_old) - (2. / (num_support_points**2)) * np.sum(K_cc_old)
+        part_e_new = (2. / (num_support_points * N)) * np.sum(K_co_new) - (2. / (num_support_points**2)) * np.sum(K_cc_new)
+
+        #e_old = energy(y_t, data, power=power)
+        #e_new = energy(y_t_candidate, date, power=power)
+        #pdb.set_trace()
         # Compute the acceptance ratio.
         # With U = 2 * DIM ** (1. / POWER) * (2 * N - 1) / N ** 2
         # 
@@ -741,8 +754,8 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
         
         # Compute metric for current and candidate.
         if do_mmd:
-            energy_t, _ = mmd(y_t, y_opt, sigma=mmd_sigma)
-            energy_t_candidate, _ = mmd(y_t_candidate, y_opt, sigma=mmd_sigma)
+            energy_t, _ = mmd(y_t, data, sigma=mmd_sigma)
+            energy_t_candidate, _ = mmd(y_t_candidate, data, sigma=mmd_sigma)
             energy_diff = energy_t_candidate - energy_t
         else:
             #energy_t, _ = energy(y_t, y_opt, power=power)
@@ -798,11 +811,17 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
 
 
         # Plot the points.
-        if plot and x.shape[1] == 2 and i % int(chain_length / 10) == 0:
-            plt.scatter(x[:, 0], x[:, 1], c='gray', alpha=0.3,
-                        label='data')
-            plt.scatter(y_opt[:, 0], y_opt[:, 1], c='limegreen',
-                        label='sp(data)')
+    
+        if plot and data.shape[1] == 2 and i % int(chain_length / 10) == 0:
+            if original_data is None:
+                plt.scatter(data[:, 0], data[:, 1], c='gray', alpha=0.3,
+                            label='data')
+            else:
+                plt.scatter(original_data[:, 0], original_data[:, 1], c='gray', alpha=0.3,
+                            label='data')
+            if optimal_support_points is not None:
+                plt.scatter(optimal_support_points[:, 0], optimal_support_points[:, 1], c='limegreen',
+                            label='sp(data)')
             plt.scatter(y_mh[i][:, 0], y_mh[i][:, 1], c='red', alpha=1,
                         label='~sp(data)', marker='+')
             plt.xlim(0, 1)
@@ -812,8 +831,8 @@ def sample_sp_exp_mech(e_opt, energy_sensitivity, x, y_opt, method='mh', num_y_t
             plt.savefig(os.path.join(save_dir, 'priv_sp_sample.png'))
             plt.show()
 
-        elif plot and x.shape[1] > 2 and i % int(chain_length / 10) == 0:
-            plot_nd(x, title='data')
+        elif plot and data.shape[1] > 2 and i % int(chain_length / 10) == 0:
+            plot_nd(data, title='data')
             plot_nd(y_mh[i], title='MH ~SP. It: {}, e={:.6f}'.format(i, energies_unthinned[i]))
 
 
@@ -993,7 +1012,7 @@ def sample_sp_exp_mech_gridwalk(energy_sensitivity, y_opt, x, alpha=None, power=
             plt.title('iter {}, e={:.4f}'.format(i, energy_t))
             plt.gca().set_aspect('equal', adjustable='box')
             plt.tight_layout()
-            plt.savefig('../output/priv_sp_sample_gridwalk_{}.png'.format(i))
+            plt.savefig('/Users/swilliamson/Work/Mo/pv/mv_sp_privacy/src/output/priv_sp_sample_gridwalk_{}.png'.format(i))
             plt.show()
 
     return y_t, energy_t
@@ -1074,7 +1093,7 @@ def mixture_model_likelihood(x, y_tilde, bandwidth, do_log=True, tag='',
         #    tag, len(x), bandwidth))
         plt.xlabel('gmm components, sorted by lik', fontsize=14)
         plt.ylabel('lik', fontsize=14)
-        plt.savefig('../output/mle_gmm_components.png')
+        plt.savefig('/Users/swilliamson/Work/Mo/pv/mv_sp_privacy/src/output/mle_gmm_components.png')
         plt.show()
 
         # Plot histogram of point likelihoods.
@@ -1146,7 +1165,7 @@ def sample_full_set_given_bandwidth(e_opt, energy_sensitivity, x, y_opt,
         plt.ylim(0, 1)
         plt.gca().set_aspect('equal', adjustable='box')
         plt.tight_layout()
-        plt.savefig('../output/fig_kde.png')
+        plt.savefig('/Users/swilliamson/Work/Mo/pv/mv_sp_privacy/src/output/fig_kde.png')
         #plt.show()
 
 
