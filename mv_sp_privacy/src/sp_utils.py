@@ -9,6 +9,7 @@ from scipy.spatial.distance import pdist
 import sys
 import tensorflow as tf
 import time
+from scipy.misc import logsumexp
 
 
 from scipy.stats import multivariate_normal
@@ -592,12 +593,82 @@ def plot_nd(d, w=10, h=10, title=None):
     #plt.show()
 
 
+def greedy_sp_exp_mech(energy_sensitivity, data, num_support_points,
+                       alpha, num_candidate_points, power=None, set_seed=False,
+                       optimal_support_points=None, plot=False):
+
+    sensitivity_string = ('\n Total alpha = {}, split over K={} steps\nPer-step distribution: Pr(e) = a / (2UK) * exp(- a / (2UK) * e) '
+                          '~ Exp(2UK/a) = Exp(2 * {:.4f}* {} / {:.3f}) = '
+                          'Exp({:.8f})\n'.format(alpha, num_support_points,
+                                                 energy_sensitivity,
+                                                 num_support_points,
+                                                 alpha,
+                                                 2 * energy_sensitivity * num_support_points / alpha))
+    print(sensitivity_string)
+    N, D = data.shape
+    support_points = np.zeros((num_support_points, D))
+
+    if set_seed:
+        np.random.seed(234)
+
+    def get_set_energy(candidate_point, data, power, existing_support_points=None):
+        if existing_support_points is not None:
+            all_points = np.vstack((existing_support_points, candidate_point))
+            en, _ = energy(all_points, data, power=power)
+        else:
+            en, _ = energy(np.expand_dims(candidate_point, 0), data, power=power)
+       
+        return en
+                       
+    
+    for i in range(num_support_points):
+        candidate_points = np.random.rand(num_candidate_points, D)
+        if i==0:
+            existing_points = None
+        else:
+            existing_points = support_points[:i, :]
+    
+        energies = np.array([get_set_energy(candidate_points[i], data, power, existing_points) for i in range(num_candidate_points)])
+        scaled_scores = -alpha * energies / (2 * energy_sensitivity)
+        scaled_scores = scaled_scores - logsumexp(scaled_scores)
+        probabilities = np.exp(scaled_scores)
+        probabilities = probabilities / np.sum(probabilities)
+        
+
+        chosen_ind = np.random.multinomial(1, probabilities).argmax()
+        support_points[i, :] += candidate_points[chosen_ind, :]
+
+        if plot and data.shape[1] == 2:
+        
+            plt.scatter(data[:, 0], data[:, 1], c='gray', alpha=0.3,
+                        label='data')
+            if optimal_support_points is not None:
+                plt.scatter(optimal_support_points[:, 0], optimal_support_points[:, 1], c='limegreen',
+                            label='sp(data)')
+
+                plt.scatter(candidate_points[:, 0], candidate_points[:, 1], c='blue', alpha=.3, marker='o')
+        
+                plt.scatter(support_points[:(i+1), 0], support_points[:(i+1), 1], c='red', alpha=1,
+                        label='~sp(data)', marker='+')
+                plt.xlim(0, 1)
+                plt.ylim(0, 1)
+                plt.gca().set_aspect('equal', adjustable='box')
+                plt.tight_layout()
+                #plt.savefig(os.path.join(save_dir, 'priv_sp_sample.png'))
+                plt.show()
+
+
+    return support_points
+        
+        
+    
+                       
 def sample_sp_exp_mech(energy_sensitivity, data, num_support_points, 
                        method='mh', num_y_tildes=1,
                        alpha=None, plot=False, do_mmd=False,
                        mmd_sigma=None, burnin=5000, thinning=2000, partial_update=True,
                        save_dir=None, power=None, set_seed=False, max_step_size=0.25,
-                       initial_step_size=1e-2, optimal_support_points=None):
+                       initial_step_size=1e-2, optimal_support_points=None, original_data=None):
     """Samples in space of support points.
 
     Args:
